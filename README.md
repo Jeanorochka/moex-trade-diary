@@ -1,6 +1,7 @@
 # Дневник сделок
 Небольшой Python-проект для выгрузки истории сделок у брокера в Excel.
 
+Для аналитики уже выгруженного дневника используйте данный  Julia-скрипт:
 ```bash
 https://github.com/Jeanorochka/julia_tradediary_analysis
 ```
