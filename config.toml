@@ -1,0 +1,27 @@
+[app]
+broker = "tbank"
+timezone = "Europe/Moscow"
+output_dir = "exports"
+filename_prefix = "trades"
+
+# Если пусто, счет выбирается интерактивно.
+default_account_id = ""
+
+# full = для FIFO загружаем историю от даты открытия счета.
+# Так выбранный период может начинаться посреди уже открытой позиции.
+reconstruction_mode = "full"
+
+# Используется только если reconstruction_mode = "lookback".
+lookback_days = 30
+
+[excel]
+# false = ровно: дата, тикер, цена входа, цена выхода, финрез, комиссия
+# true = дополнительно направление, количество и net P&L
+extra_columns = false
+include_summary_sheet = true
+
+[tbank]
+token_env = "TBANK_INVEST_TOKEN"
+base_url = "https://invest-public-api.tbank.ru/rest"
+request_timeout_seconds = 30
+normalize_futures_to_points = true
