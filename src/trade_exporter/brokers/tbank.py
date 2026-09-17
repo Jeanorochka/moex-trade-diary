@@ -167,11 +167,18 @@ class TBankBroker(BrokerAdapter):
                     continue
 
                 money_price = quotation_to_decimal(trade.get("price"))
-                display_price = self._display_price(
-                    instrument_id=instrument_id,
-                    instrument_type=instrument_type,
-                    money_price=money_price,
-                )
+
+                display_price = money_price
+                pnl_price = money_price
+
+                if (
+                    self.normalize_futures
+                    and "future" in instrument_type.lower()
+                    and instrument_id
+                ):
+                    rubles_per_point = self._future_rubles_per_point(instrument_id)
+                    pnl_price = money_price * rubles_per_point
+
                 executed_at = self._parse_timestamp(
                     str(trade.get("date") or operation.get("date"))
                 )
@@ -184,13 +191,12 @@ class TBankBroker(BrokerAdapter):
                         instrument_type=instrument_type,
                         side=side,
                         quantity=qty,
-                        pnl_price=money_price,
+                        pnl_price=pnl_price,
                         display_price=display_price,
                         commission=commission_per_unit * Decimal(qty),
                         currency=currency,
                     )
                 )
-
         fills.sort(key=lambda item: item.executed_at)
         return fills
 
@@ -227,24 +233,6 @@ class TBankBroker(BrokerAdapter):
                 break
 
         return items
-
-    def _display_price(
-        self,
-        instrument_id: str,
-        instrument_type: str,
-        money_price: Decimal,
-    ) -> Decimal:
-        if (
-            not self.normalize_futures
-            or "future" not in instrument_type.lower()
-            or not instrument_id
-        ):
-            return money_price
-
-        rubles_per_point = self._future_rubles_per_point(instrument_id)
-        if rubles_per_point == 0:
-            return money_price
-        return money_price / rubles_per_point
 
     def _future_rubles_per_point(self, instrument_id: str) -> Decimal:
         if instrument_id in self._future_factor_cache:
