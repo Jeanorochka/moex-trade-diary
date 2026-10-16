@@ -1,14 +1,40 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font
-from openpyxl.utils import get_column_letter
+import polars as pl
+from xlsxturbo import dfs_to_xlsx
+from xlsxturbo.types import SheetOptions
 
 from trade_exporter.domain.models import ClosedTrade
+
+
+def write_workbook(
+    path: str | Path,
+    sheets: Mapping[str, pl.DataFrame],
+    *,
+    sheet_options: Mapping[str, SheetOptions] | None = None,
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    defaults: SheetOptions = {
+        "autofit": True,
+        "header_format": {"bold": True},
+        "freeze_panes": True,
+        "autofilter": True,
+    }
+    options = sheet_options or {}
+    dfs_to_xlsx(
+        [
+            (frame, name, defaults | options.get(name, {}))
+            for name, frame in sheets.items()
+        ],
+        path,
+    )
+    return path
 
 
 class ExcelExporter:
@@ -43,25 +69,21 @@ class ExcelExporter:
         period_to_inclusive: datetime,
         display_timezone,
     ) -> Path:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self._new_file_path(
             broker_name,
             account_id,
             period_from,
             period_to_inclusive,
         )
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Сделки"
-
-        headers = list(self.BASE_HEADERS)
+        schema = dict(
+            zip(
+                self.BASE_HEADERS,
+                [pl.String, pl.String, pl.Float64, pl.Float64, pl.Float64, pl.Float64],
+            )
+        )
         if self.extra_columns:
-            headers += self.EXTRA_HEADERS
-        ws.append(headers)
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-
+            schema.update(zip(self.EXTRA_HEADERS, [pl.String, pl.Int64, pl.Float64]))
+        rows = []
         for trade in trades:
             row = [
                 trade.exit_at.astimezone(display_timezone).strftime("%d.%m.%y"),
@@ -72,22 +94,48 @@ class ExcelExporter:
                 float(trade.commission),
             ]
             if self.extra_columns:
-                row += [
-                    trade.direction,
-                    trade.quantity,
-                    float(trade.net_pnl),
-                ]
-            ws.append(row)
-
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        self._format_sheet(ws)
-
+                row += [trade.direction, trade.quantity, float(trade.net_pnl)]
+            rows.append(row)
+        sheets = {"Сделки": pl.DataFrame(rows, schema=schema, orient="row")}
+        options: dict[str, SheetOptions] = {
+            "Сделки": {
+                "autofit": False,
+                "column_widths": {
+                    0: 12, 1: 16, 2: 16, 3: 16, 4: 14, 5: 14,
+                    6: 14, 7: 12, 8: 14,
+                },
+                "column_formats": {
+                    "цена входа": {"num_format": "0.######"},
+                    "цена выхода": {"num_format": "0.######"},
+                    "финрез": {"num_format": "0.00"},
+                    "комиссия": {"num_format": "0.00"},
+                    **({"финрез net": {"num_format": "0.00"}} if self.extra_columns else {}),
+                },
+            }
+        }
         if self.include_summary_sheet:
-            self._add_summary(wb, trades)
-
-        wb.save(path)
-        return path
+            sheets["Итоги"] = self._summary_frame(trades)
+            options["Итоги"] = {
+                "header": False,
+                "autofit": False,
+                "freeze_panes": False,
+                "autofilter": False,
+                "column_widths": {0: 24, 1: 18},
+                "cells": {
+                    "B4": {
+                        "value": sheets["Итоги"]["value"][3],
+                        "num_format": "0.00%",
+                    },
+                    **{
+                        f"B{row}": {
+                            "value": sheets["Итоги"]["value"][row - 1],
+                            "num_format": "0.00",
+                        }
+                        for row in (5, 6, 7)
+                    },
+                },
+            }
+        return write_workbook(path, sheets, sheet_options=options)
 
     def _new_file_path(
         self,
@@ -106,29 +154,12 @@ class ExcelExporter:
         return self.output_dir / filename
 
     @staticmethod
-    def _format_sheet(ws) -> None:
-        widths = {1: 12, 2: 16, 3: 16, 4: 16, 5: 14, 6: 14, 7: 14, 8: 12, 9: 14}
-        for index, width in widths.items():
-            ws.column_dimensions[get_column_letter(index)].width = width
-
-        for row in range(2, ws.max_row + 1):
-            ws.cell(row, 3).number_format = "0.######"
-            ws.cell(row, 4).number_format = "0.######"
-            ws.cell(row, 5).number_format = "0.00"
-            ws.cell(row, 6).number_format = "0.00"
-            if ws.max_column >= 9:
-                ws.cell(row, 9).number_format = "0.00"
-
-    @staticmethod
-    def _add_summary(wb: Workbook, trades: list[ClosedTrade]) -> None:
-        ws = wb.create_sheet("Итоги")
+    def _summary_frame(trades: list[ClosedTrade]) -> pl.DataFrame:
         gross = sum((t.gross_pnl for t in trades), start=Decimal("0"))
         commission = sum((t.commission for t in trades), start=Decimal("0"))
-        net = gross - commission
         winners = sum(1 for t in trades if t.net_pnl > 0)
         losers = sum(1 for t in trades if t.net_pnl < 0)
         total = len(trades)
-
         rows = [
             ("Закрытых сделок", total),
             ("Прибыльных", winners),
@@ -136,13 +167,8 @@ class ExcelExporter:
             ("Win rate", winners / total if total else 0),
             ("Gross P&L", float(gross)),
             ("Комиссия", float(commission)),
-            ("Net P&L", float(net)),
+            ("Net P&L", float(gross - commission)),
         ]
-        for key, value in rows:
-            ws.append([key, value])
-
-        ws.column_dimensions["A"].width = 24
-        ws.column_dimensions["B"].width = 18
-        ws["B4"].number_format = "0.00%"
-        for cell in ("B5", "B6", "B7"):
-            ws[cell].number_format = "0.00"
+        return pl.DataFrame(
+            rows, schema={"metric": pl.String, "value": pl.Float64}, orient="row"
+        )

@@ -11,27 +11,43 @@ from dotenv import load_dotenv
 from trade_exporter.brokers.registry import available_brokers, create_broker
 from trade_exporter.config import load_config
 from trade_exporter.domain.models import Account
+from trade_exporter.exporters.analytics import export_analysis
 from trade_exporter.exporters.excel import ExcelExporter
+from trade_exporter.services.analytics import analyze_file, analyze_trades
 from trade_exporter.services.export_service import ExportTradeHistory
 from trade_exporter.services.matcher import FifoMatcher
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Выгрузка сделок в Excel")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Выгрузка сделок и аналитика дневника")
     parser.add_argument("--config", default="config.toml")
     parser.add_argument("--broker", choices=available_brokers())
     parser.add_argument("--account-id")
     parser.add_argument("--from", dest="date_from", help="dd.mm.yy")
     parser.add_argument("--to", dest="date_to", help="dd.mm.yy")
-    return parser.parse_args()
+    analysis = parser.add_mutually_exclusive_group()
+    analysis.add_argument("--analyze", type=Path, metavar="DIARY", help="Анализ готового Excel без API брокера")
+    analysis.add_argument("--analytics", action="store_true", help="Аналитика и графики после выгрузки")
+    parser.add_argument("--output-dir", type=Path, help="Каталог результатов")
+    parser.add_argument("--starting-capital", default="0", help="Начальный капитал для относительных метрик")
+    args = parser.parse_args(argv)
+    try:
+        args.starting_capital = Decimal(args.starting_capital)
+    except ArithmeticError:
+        parser.error("Начальный капитал должен быть числом.")
+    if not args.starting_capital.is_finite() or args.starting_capital < 0:
+        parser.error("Начальный капитал должен быть конечным неотрицательным числом.")
+    if args.analyze and any((args.broker, args.account_id, args.date_from, args.date_to)):
+        parser.error("--analyze анализирует файл целиком; параметры брокера и дат к нему не применяются.")
+    return args
 
 
 def parse_day(value: str, tz):
     value = value.strip()
 
     formats = (
-        "%d.%m.%y",   # 10.09.26
-        "%d.%m.%Y",   # 10.09.2026
+        "%d.%m.%y",
+        "%d.%m.%Y",
     )
 
     for fmt in formats:
@@ -60,9 +76,27 @@ def choose_account(accounts: list[Account]) -> Account:
         print("Нужен номер счета из списка.")
 
 
-def main():
+def print_analysis(report, output_dir):
+    workbook, json_path = export_analysis(report, output_dir)
+    win_rate = report.summary["win_rate"]
+    print(f"Win rate: {win_rate:.2%}" if win_rate is not None else "Win rate: n/a")
+    profit_factor = report.summary["profit_factor"]
+    print(f"Profit factor: {profit_factor:.3f}" if profit_factor is not None else "Profit factor: n/a")
+    print(f"Максимальная просадка: {report.summary['max_drawdown']:.2f}")
+    print(f"Аналитика и графики: {workbook.resolve()}")
+    print(f"JSON: {json_path.resolve()}")
+    return workbook, json_path
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.analyze:
+        report = analyze_file(args.analyze, starting_capital=args.starting_capital)
+        print(f"Закрытых строк FIFO: {report.summary['trades']}")
+        print(f"Net P&L: {report.summary['net_pnl']:.2f}")
+        return print_analysis(report, args.output_dir or args.analyze.parent / "analytics")
+
     load_dotenv()
-    args = parse_args()
     cfg = load_config(args.config)
     app_cfg = cfg.get("app", {})
     excel_cfg = cfg.get("excel", {})
@@ -89,7 +123,7 @@ def main():
     period_to_exclusive = last_day + timedelta(days=1)
 
     exporter = ExcelExporter(
-        output_dir=Path(str(app_cfg.get("output_dir", "exports"))),
+        output_dir=args.output_dir or Path(str(app_cfg.get("output_dir", "exports"))),
         filename_prefix=str(app_cfg.get("filename_prefix", "trades")),
         extra_columns=bool(excel_cfg.get("extra_columns", False)),
         include_summary_sheet=bool(excel_cfg.get("include_summary_sheet", True)),
@@ -112,3 +146,11 @@ def main():
     print(f"Комиссии: {commission:.2f}")
     print(f"Net P&L: {(gross - commission):.2f}")
     print(f"Excel: {path.resolve()}")
+    if args.analytics:
+        report = analyze_trades(trades, tz, starting_capital=args.starting_capital)
+        print_analysis(report, path.parent)
+    return path
+
+
+def run():
+    main()

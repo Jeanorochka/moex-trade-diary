@@ -13,7 +13,6 @@ class NewBrokerAdapter(BrokerAdapter):
         self.settings = settings
 
     def list_accounts(self) -> list[Account]:
-        # Запросить счета API и привести их к Account.
         raise NotImplementedError
 
     def get_fills(
@@ -22,5 +21,4 @@ class NewBrokerAdapter(BrokerAdapter):
         date_from: datetime,
         date_to: datetime,
     ) -> list[Fill]:
-        # Запросить историю и привести BUY/SELL к Fill.
         raise NotImplementedError

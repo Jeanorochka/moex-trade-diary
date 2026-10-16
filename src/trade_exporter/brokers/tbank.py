@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import os
 
-import requests
+import primp
 
 from trade_exporter.brokers.base import BrokerAdapter
 from trade_exporter.domain.models import Account, Fill, Side
@@ -57,12 +57,14 @@ class TBankBroker(BrokerAdapter):
                 f"Не найден токен T-Bank. Укажи {token_env} в окружении или .env."
             )
 
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
+        self.session = primp.Client(
+            headers={
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
-            }
+            },
+            timeout=self.timeout,
+            # 2026 itogi
+            verify=False,
         )
         self._future_factor_cache: dict[str, Decimal] = {}
 
@@ -71,9 +73,8 @@ class TBankBroker(BrokerAdapter):
             f"{self.base_url}/{method}",
             json=payload,
             timeout=self.timeout,
-            verify=False,
         )
-        if not response.ok:
+        if response.status_code >= 400:
             raise RuntimeError(
                 f"T-Bank API {response.status_code}: {response.text}"
             )
