@@ -1,70 +1,41 @@
 # Дневник сделок
-
 Выгрузка истории сделок T-Банка в Excel, аналитика и графики из того же `main.py`.
-FIFO восстанавливает позиции с даты открытия счёта и выбирает закрытия за нужный период.
 
-Python 3.11+. Обработка таблиц — [Polars](https://docs.pola.rs/), JSON —
-[orjson](https://github.com/ijl/orjson), HTTP — [primp](https://github.com/deedy5/primp),
-чтение Excel — [fastexcel / calamine](https://github.com/ToucanToco/fastexcel),
-запись Excel и графиков — [xlsxturbo / rust_xlsxwriter](https://github.com/tstone-1/xlsxturbo).
-Все эти библиотеки используют Rust. pandas, openpyxl и requests не нужны.
-
-Установка с зафиксированными версиями:
+Установка :
 
 ```bash
 uv sync --locked
 ```
-
-Или обычная установка:
-
-```bash
-pip install -e .
-```
-
 Для выгрузки нужен `TBANK_INVEST_TOKEN` в окружении или `.env`:
-
 ```text
 TBANK_INVEST_TOKEN=your_token
 ```
-
 Интерактивная выгрузка:
-
 ```bash
 python main.py
 ```
-
 Выгрузка с аналитикой и графиками:
-
 ```bash
 python main.py --from 01.09.26 --to 30.09.26 --analytics
 ```
-
 Счёт можно указать через `--account-id`. Параметры брокера, часовой пояс, каталог
 выгрузок и дополнительные колонки настраиваются в `config.toml`.
 
 Анализ уже выгруженного дневника работает без токена и `config.toml`:
-
 ```bash
 python main.py --analyze exports/trades.xlsx
 python main.py --analyze exports/trades.xlsx --starting-capital 100000 --output-dir analytics
 ```
-
 Те же параметры доступны через команду `trade-exporter`. При запуске через uv
 добавьте `uv run` перед `python` или `trade-exporter`.
 
 Обычная выгрузка сохраняет прежние шесть колонок:
-
 `дата | тикер | цена входа | цена выхода | финрез | комиссия`
 
-`финрез` — gross P&L. Аналитика вычитает модуль комиссии и считает net P&L.
+`финрез` — gross P&L. Аналитика вычитает модуль комиссии и считает net PnL.
 Поддерживаются `.xlsx`, `.csv` и `.tsv` с этими колонками.
 В Excel выбирается лист `Сделки`, а если его нет — первый лист.
 Даты: `dd.mm.yy`, `dd.mm.yyyy`, ISO или ячейки Excel с датой.
-Двузначный год относится к 2000–2099. Некорректные строки вызывают ошибку с номером строки.
-
-Результат аналитики — отдельные файлы `.xlsx` и `.json`. У каждого запуска своё
-имя; исходный дневник сохраняется. Без `--output-dir` анализ готового файла
-пишет результаты в каталог `analytics` рядом с ним.
 
 В Excel пять листов:
 
@@ -91,9 +62,8 @@ python main.py --analyze exports/trades.xlsx --starting-capital 100000 --output-
 внешние файлы с большей точностью отклоняются с ошибкой.
 
 Прежний отдельный [Julia-скрипт](https://github.com/Jeanorochka/julia_tradediary_analysis)
-доступен для сравнения; запуск Python-аналитики Julia не требует.
 
-Проверка:
+Тесты:
 
 ```bash
 uv sync --locked --extra dev
