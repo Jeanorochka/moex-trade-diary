@@ -1,5 +1,5 @@
 [app]
-broker = "tbank"
+broker = "finam"
 timezone = "Europe/Moscow"
 output_dir = "exports"
 filename_prefix = "trades"
