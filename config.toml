@@ -19,3 +19,13 @@ token_env = "TBANK_INVEST_TOKEN"
 base_url = "https://invest-public-api.tbank.ru/rest"
 request_timeout_seconds = 30
 normalize_futures_to_points = true
+
+[finam]
+token_env = "FINAM_API_TOKEN"
+base_url = "https://api.finam.ru/v1"
+request_timeout_seconds = 30
+request_interval_seconds = 0.32
+history_batch_days = 30
+history_limit = 50
+report_timeout_seconds = 120
+report_poll_seconds = 2

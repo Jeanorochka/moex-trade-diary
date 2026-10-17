@@ -15,6 +15,7 @@ from trade_exporter.exporters.analytics import export_analysis
 from trade_exporter.exporters.excel import ExcelExporter
 from trade_exporter.services.analytics import analyze_file, analyze_trades
 from trade_exporter.services.export_service import ExportTradeHistory
+from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
 
 
@@ -22,6 +23,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Выгрузка сделок и аналитика дневника")
     parser.add_argument("--config", default="config.toml")
     parser.add_argument("--broker", choices=available_brokers())
+    parser.add_argument("--token", help="API-токен Финама; по умолчанию из FINAM_API_TOKEN")
     parser.add_argument("--account-id")
     parser.add_argument("--from", dest="date_from", help="dd.mm.yy")
     parser.add_argument("--to", dest="date_to", help="dd.mm.yy")
@@ -37,7 +39,7 @@ def parse_args(argv=None):
         parser.error("Начальный капитал должен быть числом.")
     if not args.starting_capital.is_finite() or args.starting_capital < 0:
         parser.error("Начальный капитал должен быть конечным неотрицательным числом.")
-    if args.analyze and any((args.broker, args.account_id, args.date_from, args.date_to)):
+    if args.analyze and any((args.broker, args.token, args.account_id, args.date_from, args.date_to)):
         parser.error("--analyze анализирует файл целиком; параметры брокера и дат к нему не применяются.")
     return args
 
@@ -79,7 +81,8 @@ def choose_account(accounts: list[Account]) -> Account:
 def print_analysis(report, output_dir):
     workbook, json_path = export_analysis(report, output_dir)
     win_rate = report.summary["win_rate"]
-    print(f"Win rate: {win_rate:.2%}" if win_rate is not None else "Win rate: n/a")
+    ratio_label = "Доля положительных строк результата" if "event_type" in report.trades.columns else "Win rate"
+    print(f"{ratio_label}: {win_rate:.2%}" if win_rate is not None else f"{ratio_label}: n/a")
     profit_factor = report.summary["profit_factor"]
     print(f"Profit factor: {profit_factor:.3f}" if profit_factor is not None else "Profit factor: n/a")
     print(f"Максимальная просадка: {report.summary['max_drawdown']:.2f}")
@@ -102,7 +105,12 @@ def main(argv=None):
     excel_cfg = cfg.get("excel", {})
 
     broker_name = (args.broker or app_cfg.get("broker", "tbank")).lower()
-    broker = create_broker(broker_name, cfg.get(broker_name, {}))
+    broker_settings = dict(cfg.get(broker_name, {}))
+    if args.token is not None:
+        if broker_name != "finam":
+            raise ValueError("--token используется с --broker finam.")
+        broker_settings["token"] = args.token
+    broker = create_broker(broker_name, broker_settings)
     tz = ZoneInfo(str(app_cfg.get("timezone", "Europe/Moscow")))
 
     accounts = broker.list_accounts()
@@ -128,6 +136,28 @@ def main(argv=None):
         extra_columns=bool(excel_cfg.get("extra_columns", False)),
         include_summary_sheet=bool(excel_cfg.get("include_summary_sheet", True)),
     )
+    if broker_name == "finam":
+        path, report, source_reports = execute_finam(
+            broker=broker,
+            exporter=exporter,
+            account=account,
+            period_from=period_from,
+            period_to_exclusive=period_to_exclusive,
+            display_timezone=tz,
+            starting_capital=args.starting_capital,
+            reconstruction_mode=str(app_cfg.get("reconstruction_mode", "full")),
+            lookback_days=int(app_cfg.get("lookback_days", 30)),
+        )
+        print("\nГотово.")
+        print("Результат: закрытия акций FIFO и начисленная ВМ фьючерсов, включая открытые позиции.")
+        print(f"Gross P&L: {report.summary['gross_pnl']:.2f}")
+        print(f"Комиссии: {report.summary['commission']:.2f}")
+        print(f"Net P&L: {report.summary['net_pnl']:.2f}")
+        print(f"Excel: {path.resolve()}")
+        print_analysis(report, path.parent)
+        if source_reports:
+            print(f"Исходные отчёты ({len(source_reports)}): {source_reports[0].parent.resolve()}")
+        return path
     use_case = ExportTradeHistory(
         broker=broker,
         matcher=FifoMatcher(),

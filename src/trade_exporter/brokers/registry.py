@@ -1,9 +1,11 @@
 from collections.abc import Callable
 
 from trade_exporter.brokers.base import BrokerAdapter
+from trade_exporter.brokers.finam import FinamBroker
 from trade_exporter.brokers.tbank import TBankBroker
 
 BROKER_FACTORIES: dict[str, Callable[[dict], BrokerAdapter]] = {
+    "finam": FinamBroker,
     "tbank": TBankBroker,
 }
 

@@ -54,6 +54,7 @@ HEADERS = {
     "cumulative_pnl": "накопленный net P&L",
     "equity": "капитал",
     "drawdown": "просадка",
+    "event_type": "тип результата",
 }
 
 
@@ -63,7 +64,7 @@ def _json_default(value):
     raise TypeError(type(value).__name__)
 
 
-def _display_frame(frame: pl.DataFrame, *, monthly=False) -> pl.DataFrame:
+def _display_frame(frame: pl.DataFrame, *, monthly=False, result_events=False) -> pl.DataFrame:
     frame = frame.with_columns(
         pl.col(name).cast(pl.Float64)
         for name, dtype in frame.schema.items()
@@ -71,7 +72,15 @@ def _display_frame(frame: pl.DataFrame, *, monthly=False) -> pl.DataFrame:
     )
     if "date" in frame.columns:
         frame = frame.with_columns(pl.col("date").dt.strftime("%m.%Y" if monthly else "%d.%m.%Y"))
-    return frame.rename({name: HEADERS.get(name, name) for name in frame.columns})
+    if "event_type" in frame.columns:
+        frame = frame.with_columns(pl.col("event_type").replace({
+            "stock_fifo": "закрытие акций FIFO",
+            "stock_closed": "закрытие акций FIFO",
+            "futures_margin": "вариационная маржа и комиссии",
+            "futures_fee": "комиссии фьючерсов",
+        }))
+    headers = HEADERS | ({"trades": "строк результата", "win_rate": "доля положительных"} if result_events else {})
+    return frame.rename({name: headers.get(name, name) for name in frame.columns})
 
 
 def _column_ref(index: int) -> str:
@@ -105,8 +114,22 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
     workbook_path = stem.with_suffix(".xlsx")
     json_path = stem.with_suffix(".json")
     labels = list(report.summary)
+    result_events = "event_type" in report.trades.columns
+    summary_labels = SUMMARY_LABELS | ({
+        "trades": "Строк результата: FIFO акций и ВМ фьючерсов",
+        "wins": "Положительных строк результата",
+        "losses": "Отрицательных строк результата",
+        "breakeven": "Нулевых строк результата",
+        "win_rate": "Доля положительных строк результата",
+        "best_trade": "Лучшая строка результата",
+        "worst_trade": "Худшая строка результата",
+        "max_win_streak": "Серия положительных строк результата",
+        "max_loss_streak": "Серия отрицательных строк результата",
+        "trading_days": "Дней с результатом",
+        "max_drawdown": "Просадка по строкам результата",
+    } if result_events else {})
     summary = pl.DataFrame({
-        "показатель": [SUMMARY_LABELS.get(key, key) for key in labels],
+        "показатель": [summary_labels.get(key, key) for key in labels],
         "значение": [
             None if report.summary[key] is None else float(report.summary[key])
             for key in labels
@@ -114,10 +137,10 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
     })
     sheets = {
         "Аналитика": summary,
-        "Сделки": _display_frame(report.trades),
-        "Дни": _display_frame(report.daily),
-        "Месяцы": _display_frame(report.monthly, monthly=True),
-        "Тикеры": _display_frame(report.by_ticker),
+        "Результаты" if result_events else "Сделки": _display_frame(report.trades, result_events=result_events),
+        "Дни": _display_frame(report.daily, result_events=result_events),
+        "Месяцы": _display_frame(report.monthly, monthly=True, result_events=result_events),
+        "Тикеры": _display_frame(report.by_ticker, result_events=result_events),
     }
     options = {}
     formats = {
@@ -128,6 +151,7 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
         "просадка": {"num_format": "#,##0.00"},
         "цена*": {"num_format": "0.######"},
         "win rate": {"num_format": "0.00%"},
+        "доля положительных": {"num_format": "0.00%"},
         "дата": {"num_format": "dd.mm.yyyy"},
     }
     for name, frame in sheets.items():
@@ -136,7 +160,7 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
             if any(fnmatchcase(column, pattern) for column in frame.columns)
         }}
     options["Аналитика"] = {
-        "column_widths": {0: 48, 1: 22},
+        "column_widths": {0: 64 if result_events else 48, 1: 22},
         "column_formats": {"значение": {"num_format": "#,##0.00"}},
         "cells": {
             f"B{labels.index(key) + 2}": {
@@ -166,5 +190,9 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
         "monthly": report.monthly.to_dicts(),
         "by_ticker": report.by_ticker.to_dicts(),
     }
+    if result_events:
+        payload["basis"] = "stock_fifo_and_reported_futures_variation_margin"
+        payload["futures_basis"] = "paid_margin_plus_change_in_pending_margin_including_open_positions"
+        payload["results"] = report.trades.to_dicts()
     json_path.write_bytes(orjson.dumps(payload, default=_json_default, option=orjson.OPT_INDENT_2))
     return workbook_path, json_path

@@ -28,6 +28,7 @@ COLUMN_NAMES = {
     "цена выхода": "exit_price",
     "финрез": "gross_pnl",
     "комиссия": "commission",
+    "тип результата": "event_type",
 }
 
 
@@ -82,7 +83,7 @@ def _date(value, row: int) -> date:
     raise ValueError(f"Строка {row}, date: некорректная дата {value!r}")
 
 
-def _normalize(frame: pl.DataFrame) -> pl.DataFrame:
+def _normalize(frame: pl.DataFrame, *, result_events: bool = False) -> pl.DataFrame:
     names = {}
     for column in frame.columns:
         normalized = column.strip().lower()
@@ -91,10 +92,19 @@ def _normalize(frame: pl.DataFrame) -> pl.DataFrame:
             raise ValueError(f"Повторяющаяся колонка: {normalized}")
         names[column] = normalized
     frame = frame.rename(names)
-    required = [name for name in TRADE_SCHEMA if name != "net_pnl"]
+    required = [
+        name for name in TRADE_SCHEMA
+        if name != "net_pnl" and (not result_events or name not in {"entry_price", "exit_price"})
+    ]
     missing = [name for name in required if name not in frame.columns]
     if missing:
         raise ValueError("Не хватает колонок: " + ", ".join(missing))
+    if result_events:
+        frame = frame.with_columns(
+            [pl.lit(None).alias(name) for name in ("entry_price", "exit_price", "event_type")
+             if name not in frame.columns]
+        )
+        required = [name for name in TRADE_SCHEMA if name != "net_pnl"] + ["event_type"]
 
     records = []
     for row_number, row in enumerate(frame.select(required).iter_rows(named=True), 2):
@@ -104,12 +114,23 @@ def _normalize(frame: pl.DataFrame) -> pl.DataFrame:
         record = {
             "date": _date(row["date"], row_number),
             "ticker": ticker.strip(),
-            **{name: _money(row[name], row_number, name) for name in MONEY_COLUMNS},
+            **{
+                name: None if result_events and name in {"entry_price", "exit_price"}
+                and row[name] is None else _money(row[name], row_number, name)
+                for name in MONEY_COLUMNS
+            },
         }
         record["commission"] = record["commission"].copy_abs()
+        if result_events:
+            event_type = row["event_type"]
+            if event_type is not None and (not isinstance(event_type, str) or not event_type.strip()):
+                raise ValueError(f"Строка {row_number}, event_type: требуется непустой тип результата")
+            record["event_type"] = event_type.strip() if event_type is not None else None
         records.append(record)
 
     schema = {name: dtype for name, dtype in TRADE_SCHEMA.items() if name != "net_pnl"}
+    if result_events:
+        schema["event_type"] = pl.String
     return (
         pl.DataFrame(records, schema=schema)
         .with_columns((pl.col("gross_pnl") - pl.col("commission")).alias("net_pnl"))
@@ -152,10 +173,23 @@ def analyze_frame(
     frame: pl.DataFrame,
     starting_capital: Decimal = ZERO,
 ) -> AnalysisReport:
+    return _analyze(_normalize(frame), starting_capital)
+
+
+def analyze_results(
+    frame: pl.DataFrame,
+    starting_capital: Decimal = ZERO,
+) -> AnalysisReport:
+    return _analyze(_normalize(frame, result_events=True), starting_capital)
+
+
+def _analyze(
+    trades: pl.DataFrame,
+    starting_capital: Decimal,
+) -> AnalysisReport:
     capital = _money(starting_capital, 0, "starting_capital")
     if capital < 0:
         raise ValueError("Стартовый капитал не может быть отрицательным")
-    trades = _normalize(frame)
     daily = _totals(trades, "date").with_columns(
         pl.col("net_pnl").cum_sum().alias("cumulative_pnl")
     )
@@ -265,6 +299,14 @@ def load_diary(path: str | Path) -> pl.DataFrame:
             sheets = fastexcel.read_excel(path).sheet_names
             if not sheets:
                 raise ValueError("В книге нет листов")
+            if "Результаты" in sheets:
+                results = pl.read_excel(
+                    path, sheet_name="Результаты", engine="calamine", infer_schema_length=None,
+                    drop_empty_rows=False, raise_if_empty=False,
+                )
+                normalized = {COLUMN_NAMES.get(name.strip().lower(), name.strip().lower()) for name in results.columns}
+                if "event_type" in normalized:
+                    return results
             sheet = "Сделки" if "Сделки" in sheets else sheets[0]
             return pl.read_excel(
                 path,
@@ -290,4 +332,8 @@ def analyze_file(
     path: str | Path,
     starting_capital: Decimal = ZERO,
 ) -> AnalysisReport:
-    return analyze_frame(load_diary(path), starting_capital)
+    frame = load_diary(path)
+    normalized = {COLUMN_NAMES.get(name.strip().lower(), name.strip().lower()) for name in frame.columns}
+    if "event_type" in normalized:
+        return analyze_results(frame, starting_capital)
+    return analyze_frame(frame, starting_capital)
