@@ -5,7 +5,8 @@
 `v. 2.2` - переоценка портфеля, денежные потоки, доходность<br>
 `v. 3.0` - теперь открывает няшный TKinter интерфейс для выгрузки<br>
 
-<img width="645" height="544" alt="image" src="https://github.com/user-attachments/assets/d386792a-61a4-4f0e-8f28-43273523d2c9" />
+<img width="691" height="785" alt="image" src="https://github.com/user-attachments/assets/d56bd72b-f0ec-4bd7-b119-3bcb1f312533" />
+
 
 Установка :
 
