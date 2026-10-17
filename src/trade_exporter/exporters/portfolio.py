@@ -76,9 +76,11 @@ SUMMARY = {
     "valuation_residual_threshold": "Точность сверки капитала",
     "funding_status": "Подтверждение исходного капитала",
     "cash_flow_error": "Причина недоступности истории движений",
+    "period_cash_flow_mode": "Источник внешних движений выбранного периода",
 }
 PERCENTAGES = {"unrealized_return", "weight", "equity_weight", "long_weight", "short_weight", "holdings_return", "profit_to_net_funding_ratio", "xirr"}
 VALUES = {
+    "manual": "Ручной журнал пользователя", "auto": "Автоматически из денежных операций брокера",
     "unique_bracketed_root": "Однозначно рассчитана", "multiple_roots": "Несколько возможных значений",
     "no_bracketed_root": "Значение в исследованном диапазоне не найдено", "same_day": "Недостаточный период наблюдений",
     "no_sign_change": "Нет денежных потоков обоих направлений", "no_inception_funding": "Исходный вклад не подтвержден",
@@ -161,6 +163,25 @@ PERIOD_METRICS = (
 )
 
 
+def _cash_flow_mode(period):
+    return period.get("cash_flow_mode") or period.get("period_cash_flow_mode") or "auto"
+
+
+def _cash_flow_basis(period):
+    basis = str(period.get("cash_flow_basis") or "").strip()
+    if _cash_flow_mode(period) == "manual":
+        return " ".join(filter(None, (
+            "Ручной журнал внешних движений пользователя; брокером не подтверждён.", basis,
+        )))
+    if _cash_flow_mode(period) == "auto":
+        return basis or "Денежные операции брокера за выбранный период (автоматический режим)."
+    return basis or "Источник денежных движений не определён."
+
+
+def _manual_flow_dates():
+    return "Даты ручных движений учитываются на конец указанного дня; время операции задано расчётным допущением."
+
+
 def portfolio_period_sheet(period: dict) -> pl.DataFrame:
     complete = period.get("status") == "complete"
     quality = " ".join(str(value) for value in period.get("quality", []))
@@ -185,10 +206,19 @@ def portfolio_period_sheet(period: dict) -> pl.DataFrame:
             "основание": method, "качество данных": quality,
         })
     rows.append({
-        "показатель": "Источник оценки и движений", "значение": None, "единица": "",
+        "показатель": "Источник оценки портфеля", "значение": None, "единица": "",
         "дата / период": dates, "основание": str(period.get("source") or "Источник не указан."),
         "качество данных": quality,
     })
+    rows.append({
+        "показатель": "Источник денежных движений", "значение": None, "единица": "",
+        "дата / период": dates, "основание": _cash_flow_basis(period), "качество данных": quality,
+    })
+    if _cash_flow_mode(period) == "manual":
+        rows.append({
+            "показатель": "Время ручных движений", "значение": None, "единица": "",
+            "дата / период": dates, "основание": _manual_flow_dates(), "качество данных": quality,
+        })
     if period.get("requested_end"):
         rows.append({
             "показатель": "Запрошенное окончание периода (не включается)", "значение": None,
@@ -256,7 +286,9 @@ def _portfolio_period_html(period):
     return ('<section class="panel" id="portfolio-period" style="margin-top:20px"><h2>Портфель за период</h2><p class="sub">'
         + escape(str(period.get("started_at") or "н/д")) + ' — ' + escape(str(period.get("ended_at") or "н/д"))
         + '</p><div class="stats">' + ''.join(cards) + '</div><p class="caption">'
-        + escape(str(period.get("source") or "Источник не указан.")) + '</p>'
+        + 'Источник оценки портфеля: ' + escape(str(period.get("source") or "Источник не указан.")) + '</p>'
+        + '<p class="caption">Источник денежных движений: ' + escape(_cash_flow_basis(period)) + '</p>'
+        + ('<p class="caption">' + escape(_manual_flow_dates()) + '</p>' if _cash_flow_mode(period) == "manual" else '')
         + ('<p class="caption">' + escape(quality) + '</p>' if quality else '') + '</section>')
 
 

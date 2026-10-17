@@ -19,6 +19,7 @@ from trade_exporter.config import load_config
 
 BROKERS = {"finam": "Финам", "tbank": "Т-Банк"}
 TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
+CASH_FLOW_KINDS = {"deposit": "Пополнение", "withdrawal": "Вывод"}
 
 
 def _day(value: str) -> date:
@@ -30,9 +31,41 @@ def _day(value: str) -> date:
     raise ValueError("Укажи дату в формате дд.мм.гг или дд.мм.гггг.")
 
 
+def _positive_decimal(value, message: str) -> Decimal:
+    raw = "".join(str(value or "").split()).replace(",", ".")
+    try:
+        amount = Decimal(raw)
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError
+        with localcontext() as context:
+            context.prec = 80
+            represented = amount.quantize(Decimal("1e-18"))
+        if represented != amount or amount >= Decimal("1e20"):
+            raise ValueError
+    except (InvalidOperation, ValueError) as error:
+        raise ValueError(message) from error
+    return amount
+
+
+def _manual_cash_flow(row, first: date, last: date) -> dict[str, str]:
+    if not isinstance(row, dict):
+        raise ValueError("Для операции нужны дата, направление и сумма.")
+    day = _day(row.get("date", ""))
+    if not first <= day <= last:
+        raise ValueError("Дата пополнения или вывода должна входить в выбранный период.")
+    kind = str(row.get("kind", "")).strip().lower()
+    if kind not in CASH_FLOW_KINDS:
+        raise ValueError("Выбери направление операции: пополнение или вывод.")
+    amount = _positive_decimal(
+        row.get("amount"), "Укажи положительную сумму операции: до 20 целых и 18 дробных цифр.",
+    )
+    return {"date": day.strftime("%d.%m.%Y"), "kind": kind, "amount": format(amount, "f")}
+
+
 def build_export_args(
     broker, account_id, date_from, date_to, starting_capital,
     output_dir=None, config_path="config.toml", *, today: date | None = None,
+    cash_flow_mode="auto", cash_flows=(),
 ) -> list[str]:
     broker = str(broker).strip().lower()
     if broker not in BROKERS:
@@ -46,18 +79,24 @@ def build_export_args(
     today = today or datetime.now(ZoneInfo("Europe/Moscow")).date()
     if first > today or last > today:
         raise ValueError("Даты периода не могут быть позже сегодняшнего дня.")
-    raw_capital = "".join(str(starting_capital or "").split()).replace(",", ".")
-    try:
-        capital = Decimal(raw_capital)
-        if not capital.is_finite() or capital <= 0:
-            raise ValueError
-        with localcontext() as context:
-            context.prec = 80
-            represented = capital.quantize(Decimal("1e-18"))
-        if represented != capital or capital >= Decimal("1e20"):
-            raise ValueError
-    except (InvalidOperation, ValueError) as error:
-        raise ValueError("Укажи положительный начальный капитал: до 20 целых и 18 дробных цифр.") from error
+    capital = _positive_decimal(
+        starting_capital, "Укажи положительный начальный капитал: до 20 целых и 18 дробных цифр.",
+    )
+    cash_flow_mode = str(cash_flow_mode).strip().lower()
+    if cash_flow_mode not in {"auto", "manual"}:
+        raise ValueError("Выбери автоматический или ручной ввод пополнений и выводов.")
+    flow_arguments = []
+    if cash_flow_mode == "manual":
+        if not isinstance(cash_flows, (list, tuple)):
+            raise ValueError("Укажи список пополнений и выводов.")
+        flow_arguments = ["--cash-flow-mode", "manual"]
+        for index, row in enumerate(cash_flows, 1):
+            try:
+                flow = _manual_cash_flow(row, first, last)
+            except ValueError as error:
+                raise ValueError(f"Операция {index}: {error}") from error
+            sign = "+" if flow["kind"] == "deposit" else "-"
+            flow_arguments.extend(("--cash-flow", f"{flow['date']}:{sign}{flow['amount']}"))
     config_path = Path(config_path).resolve()
     raw_output = str(output_dir or "").strip()
     if "\x00" in raw_output:
@@ -76,7 +115,7 @@ def build_export_args(
         "--from", first.strftime("%d.%m.%Y"), "--to", last.strftime("%d.%m.%Y"),
         "--starting-capital", format(capital, "f"), "--output-dir", str(output_path),
         "--analytics",
-    ]
+    ] + flow_arguments
 
 
 def initial_broker(config: dict, environment=None) -> str | None:
@@ -191,11 +230,12 @@ class _Window:
         self.config_path = root_dir / "config.toml"
         self.events = Queue()
         self.accounts = []
+        self.cash_flows = []
         self.busy = False
         self.window = tk.Tk()
         self.window.title("Дневник сделок")
-        self.window.geometry("660x550")
-        self.window.minsize(620, 510)
+        self.window.geometry("700x760")
+        self.window.minsize(660, 710)
         self.window.protocol("WM_DELETE_WINDOW", self._close)
         try:
             config = _read_config(root_dir)
@@ -215,11 +255,15 @@ class _Window:
         self.last = tk.StringVar(value=today.strftime("%d.%m.%y"))
         self.capital = tk.StringVar()
         self.output = tk.StringVar(value=str(output))
+        self.cash_flow_mode = tk.StringVar(value="auto")
+        self.flow_date = tk.StringVar(value=today.strftime("%d.%m.%y"))
+        self.flow_kind = tk.StringVar(value=CASH_FLOW_KINDS["deposit"])
+        self.flow_amount = tk.StringVar()
         self.status = tk.StringVar(value="Выбери брокера и загрузи счета.")
         body = ttk.Frame(self.window, padding=16)
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
-        body.rowconfigure(10, weight=1)
+        body.rowconfigure(11, weight=1)
         ttk.Label(body, text="Выгрузка сделок и аналитика", font=("Segoe UI", 15, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 15))
         ttk.Label(body, text="Брокер").grid(row=1, column=0, sticky="w", padx=(0, 12))
         self.broker_box = ttk.Combobox(body, textvariable=self.broker, values=list(BROKERS.values()), state="readonly")
@@ -249,19 +293,51 @@ class _Window:
         output_entry.grid(row=6, column=1, sticky="ew", pady=4)
         self.folder_button = ttk.Button(body, text="Обзор…", command=self._choose_folder)
         self.folder_button.grid(row=6, column=2, padx=(8, 0))
+        flow_panel = ttk.LabelFrame(body, text="Пополнения и выводы", padding=(10, 6))
+        flow_panel.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        flow_panel.columnconfigure(0, weight=1)
+        modes = ttk.Frame(flow_panel)
+        modes.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.flow_mode_buttons = []
+        for label, mode in (("Из данных брокера", "auto"), ("Ввести вручную", "manual")):
+            button = ttk.Radiobutton(modes, text=label, variable=self.cash_flow_mode, value=mode, command=self._cash_flow_mode_changed)
+            button.pack(side="left", padx=(0, 18))
+            self.flow_mode_buttons.append(button)
+        ttk.Label(flow_panel, text="Укажи все пополнения и выводы за период.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
+        flow_inputs = ttk.Frame(flow_panel)
+        flow_inputs.grid(row=2, column=0, columnspan=2, sticky="ew")
+        for column, label in enumerate(("Дата, дд.мм.гг", "Направление", "Сумма")):
+            ttk.Label(flow_inputs, text=label).grid(row=0, column=column, sticky="w")
+        self.flow_date_entry = ttk.Entry(flow_inputs, textvariable=self.flow_date, width=12)
+        self.flow_date_entry.grid(row=1, column=0, padx=(0, 6))
+        self.flow_kind_box = ttk.Combobox(flow_inputs, textvariable=self.flow_kind, values=list(CASH_FLOW_KINDS.values()), state="readonly", width=14)
+        self.flow_kind_box.grid(row=1, column=1, padx=(0, 6))
+        self.flow_amount_entry = ttk.Entry(flow_inputs, textvariable=self.flow_amount, width=17)
+        self.flow_amount_entry.grid(row=1, column=2, padx=(0, 6))
+        self.add_flow_button = ttk.Button(flow_inputs, text="Добавить", command=self._add_cash_flow)
+        self.add_flow_button.grid(row=1, column=3)
+        self.cash_flow_list = tk.Listbox(flow_panel, height=4, exportselection=False, font=("Segoe UI", 9))
+        self.cash_flow_list.grid(row=3, column=0, sticky="ew", pady=5)
+        self.remove_flow_button = ttk.Button(flow_panel, text="Удалить", command=self._remove_cash_flow)
+        self.remove_flow_button.grid(row=3, column=1, sticky="n", padx=(8, 0), pady=5)
+        ttk.Label(
+            flow_panel, text="Ручной список заменяет внешние потоки брокера. Пустой список — операций не было.\nСуммы в валюте счёта; даты учитываются на конец дня.",
+            foreground="#5c6570", wraplength=630,
+        ).grid(row=4, column=0, columnspan=2, sticky="w")
         self.start_button = ttk.Button(body, text="Выгрузить и рассчитать", command=self._start)
-        self.start_button.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(12, 8))
+        self.start_button.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         self.progress = ttk.Progressbar(body, mode="indeterminate")
-        self.progress.grid(row=8, column=0, columnspan=3, sticky="ew")
-        ttk.Label(body, textvariable=self.status, wraplength=590).grid(row=9, column=0, columnspan=3, sticky="w", pady=8)
+        self.progress.grid(row=9, column=0, columnspan=3, sticky="ew")
+        ttk.Label(body, textvariable=self.status, wraplength=630).grid(row=10, column=0, columnspan=3, sticky="w", pady=8)
         log_frame = ttk.Frame(body)
-        log_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
-        self.log = tk.Text(log_frame, height=9, state="disabled", wrap="word", font=("Consolas", 9))
+        log_frame.grid(row=11, column=0, columnspan=3, sticky="nsew")
+        self.log = tk.Text(log_frame, height=5, state="disabled", wrap="word", font=("Consolas", 9))
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
         self.entries = [first_entry, last_entry, capital_entry, output_entry]
+        self._cash_flow_mode_changed()
         self.window.after(80, self._poll)
 
     def _broker_name(self):
@@ -281,10 +357,42 @@ class _Window:
             widget.configure(state="disabled" if value else "normal")
         for widget in (self.broker_box, self.account_box):
             widget.configure(state="disabled" if value else "readonly")
+        self._cash_flow_mode_changed()
         if value:
             self.progress.start(12)
         else:
             self.progress.stop()
+
+    def _cash_flow_mode_changed(self):
+        enabled = not self.busy and self.cash_flow_mode.get() == "manual"
+        for widget in (self.flow_date_entry, self.flow_amount_entry, self.add_flow_button, self.remove_flow_button, self.cash_flow_list):
+            widget.configure(state="normal" if enabled else "disabled")
+        self.flow_kind_box.configure(state="readonly" if enabled else "disabled")
+        for button in self.flow_mode_buttons:
+            button.configure(state="disabled" if self.busy else "normal")
+
+    def _add_cash_flow(self):
+        if self.busy or self.cash_flow_mode.get() != "manual":
+            return
+        try:
+            flow = _manual_cash_flow({
+                "date": self.flow_date.get(),
+                "kind": next((kind for kind, label in CASH_FLOW_KINDS.items() if label == self.flow_kind.get()), ""),
+                "amount": self.flow_amount.get(),
+            }, _day(self.first.get()), _day(self.last.get()))
+        except ValueError as error:
+            self.messagebox.showerror("Проверь операцию", str(error), parent=self.window)
+            return
+        self.cash_flows.append(flow)
+        self.cash_flow_list.insert("end", f"{flow['date']}   {CASH_FLOW_KINDS[flow['kind']]}   {flow['amount']}")
+        self.flow_amount.set("")
+
+    def _remove_cash_flow(self):
+        if self.busy or self.cash_flow_mode.get() != "manual":
+            return
+        for index in reversed(self.cash_flow_list.curselection()):
+            del self.cash_flows[index]
+            self.cash_flow_list.delete(index)
 
     def _load_accounts(self):
         if not self._broker_name():
@@ -308,6 +416,7 @@ class _Window:
                 self._broker_name(), account_id, self.first.get(), self.last.get(),
                 self.capital.get(), self.output.get(), self.config_path,
                 today=datetime.now(self.timezone).date(),
+                cash_flow_mode=self.cash_flow_mode.get(), cash_flows=self.cash_flows,
             )
         except ValueError as error:
             self.messagebox.showerror("Проверь поля", str(error), parent=self.window)

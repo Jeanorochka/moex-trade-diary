@@ -20,6 +20,7 @@ from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.portfolio_service import execute_portfolio, prepare_portfolio_report, save_portfolio_report
 from trade_exporter.services.risk import analyze_result_risk
+from trade_exporter.services.manual_flows import parse_cash_flows
 
 
 TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
@@ -41,6 +42,8 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", type=Path, help="Каталог результатов")
     parser.add_argument("--starting-capital", default="0", help="Начальный капитал для относительных метрик")
     parser.add_argument("--capital-from", help="Дата стартового капитала для текущего портфеля, dd.mm.yy")
+    parser.add_argument("--cash-flow-mode", choices=("auto", "manual"), default="auto", help="Внешние движения: из брокера или полный ручной журнал")
+    parser.add_argument("--cash-flow", action="append", default=[], metavar="DATE:AMOUNT", help="Ручное движение dd.mm.yyyy:+1000 или dd.mm.yyyy:-500; повторяется для каждой операции")
     args = parser.parse_args(argv)
     try:
         args.starting_capital = Decimal(args.starting_capital)
@@ -48,6 +51,16 @@ def parse_args(argv=None):
         parser.error("Начальный капитал должен быть числом.")
     if not args.starting_capital.is_finite() or args.starting_capital < 0:
         parser.error("Начальный капитал должен быть конечным неотрицательным числом.")
+    try:
+        args.manual_cash_flows = parse_cash_flows(args.cash_flow)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.cash_flow and args.cash_flow_mode != "manual":
+        parser.error("Для ручных движений выбери --cash-flow-mode manual.")
+    if args.cash_flow_mode == "manual" and args.starting_capital <= 0:
+        parser.error("Для ручных движений нужен положительный стартовый капитал.")
+    if args.analyze and (args.cash_flow_mode != "auto" or args.cash_flow):
+        parser.error("Ручные движения задаются при выгрузке портфеля; --analyze сохраняет журнал из исходного файла.")
     if args.analyze and any((args.broker, args.token, args.account_id, args.date_from, args.date_to, args.capital_from)):
         parser.error("--analyze анализирует файл целиком; параметры брокера и дат к нему не применяются.")
     if args.portfolio and (args.date_from or args.date_to):
@@ -212,6 +225,7 @@ def main(argv=None, *, progress=None):
         return print_portfolio(
             broker, account, output_dir, starting_capital=args.starting_capital,
             capital_started_at=baseline,
+            cash_flow_mode=args.cash_flow_mode, manual_cash_flows=args.manual_cash_flows,
             progress=progress,
         )
 
@@ -238,6 +252,7 @@ def main(argv=None, *, progress=None):
         broker, account, output_dir, starting_capital=args.starting_capital,
         capital_started_at=capital_started_at, result_period_start=period_from,
         result_period_end=period_to_exclusive, progress=progress,
+        cash_flow_mode=args.cash_flow_mode, manual_cash_flows=args.manual_cash_flows,
     )
     if broker_name == "finam":
         status("Загрузка исполнений и брокерских отчётов Финама")

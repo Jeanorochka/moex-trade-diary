@@ -8,7 +8,7 @@ from zipfile import ZipFile
 import orjson
 import polars as pl
 
-from trade_exporter.exporters.portfolio import export_portfolio
+from trade_exporter.exporters.portfolio import export_portfolio, portfolio_period_sheet
 
 
 MONEY = pl.Decimal(precision=38, scale=18)
@@ -436,3 +436,77 @@ def test_actual_period_risk_precedes_trading_proxy_with_matching_percent_formats
     text = html_path.read_text(encoding="utf-8")
     assert "2,48%" in text
     assert "40,00%" in text
+
+
+def test_manual_period_cash_flow_source_is_separate_from_broker_nav():
+    period = {
+        "status": "complete", "base_currency": "RUB", "starting_equity": Decimal("10000"),
+        "ending_equity": Decimal("11200"), "external_inflows": Decimal("1000"),
+        "external_outflows": Decimal("200"), "net_external_flows": Decimal("800"),
+        "total_profit": Decimal("400"), "period_return": 0.038,
+        "cash_flow_mode": "manual", "cash_flow_basis": "Полный ручной журнал пользователя.",
+        "source": "Finam GetAccount.equity", "quality": ["Полнота внешних движений заявлена пользователем."],
+    }
+    frame = portfolio_period_sheet(period)
+    nav = frame.filter(pl.col("показатель") == "Источник оценки портфеля")
+    flows = frame.filter(pl.col("показатель") == "Источник денежных движений")
+    dates = frame.filter(pl.col("показатель") == "Время ручных движений")
+    assert nav["основание"].to_list() == ["Finam GetAccount.equity"]
+    assert "ручной журнал пользователя" in flows["основание"][0]
+    assert "брокером не подтверждён" in flows["основание"][0]
+    assert "конец указанного дня" in dates["основание"][0]
+    assert frame.filter(pl.col("показатель") == "Капитал в конце")["значение"].to_list() == [11200]
+    assert frame.filter(pl.col("показатель") == "Чистые внешние движения")["значение"].to_list() == [800]
+
+
+def test_legacy_period_without_cash_flow_mode_keeps_automatic_source():
+    frame = portfolio_period_sheet({"status": "unavailable", "source": "Broker NAV", "quality": []})
+    flows = frame.filter(pl.col("показатель") == "Источник денежных движений")
+    assert "Денежные операции брокера" in flows["основание"][0]
+    assert "автоматический режим" in flows["основание"][0]
+    assert "Время ручных движений" not in frame["показатель"].to_list()
+
+
+def test_manual_period_exports_source_and_timing_without_combining_auto_flows(tmp_path):
+    value = report()
+    manual_note = "Полный ручной журнал пользователя; даты движений учитываются на конец дня."
+    value.summary.update({
+        "period_cash_flow_mode": "manual",
+        "period_cash_flow_quality": [manual_note],
+        "portfolio_period": {
+            "status": "complete", "base_currency": "RUB", "started_at": "2025-09-25T00:00:00+03:00",
+            "ended_at": "2026-10-17T12:00:00+03:00", "starting_equity": Decimal("30000"),
+            "ending_equity": Decimal("33800"), "external_inflows": Decimal("1000"),
+            "external_outflows": Decimal("0"), "net_external_flows": Decimal("1000"),
+            "total_profit": Decimal("2800"), "period_return": 0.092, "annualized_return": 0.086,
+            "xirr": None, "days": 387.5, "valuation_basis": "current_broker_nav",
+            "cash_flow_mode": "manual", "cash_flow_basis": manual_note,
+            "quality": [manual_note], "source": "Finam GetAccount.equity",
+        },
+        "risk": {"as_of": "2026-10-17", "metrics": [{
+            "metric": "capital_period_return", "label": "Доходность портфеля за период", "value": 0.092,
+            "unit": "fraction", "basis": "starting_capital_assumption", "quality_reason": manual_note,
+        }], "quality": [manual_note]},
+    })
+    value.period_flows = pl.DataFrame([{
+        "timestamp": datetime(2026, 6, 16, 20, 59, 59, tzinfo=timezone.utc), "amount": Decimal("1000"),
+        "currency": "RUB", "kind": "external", "id": "manual-1", "amount_base": Decimal("1000"),
+    }], schema=FLOW_SCHEMA)
+    workbook, json_path, html_path = export_portfolio(value, tmp_path)
+    sheets = pl.read_excel(workbook, sheet_id=0)
+    assert sheets["Потоки периода"]["сумма"].to_list() == [1000]
+    assert sheets["Движения"]["сумма"].to_list() == [30000, -1000]
+    assert sheets["Риск и доходность"]["качество данных"].to_list() == [manual_note]
+    source = sheets["Портфель за период"].filter(pl.col("показатель") == "Источник денежных движений")
+    assert "брокером не подтверждён" in source["основание"][0]
+    text = html_path.read_text(encoding="utf-8")
+    assert "Источник оценки портфеля: Finam GetAccount.equity" in text
+    assert "Источник денежных движений: Ручной журнал" in text
+    assert "конец указанного дня" in text
+    assert "33 800,00 ₽" in text
+    assert "2 800,00 ₽" in text
+    payload = orjson.loads(json_path.read_bytes())
+    assert payload["summary"]["portfolio_period"]["cash_flow_mode"] == "manual"
+    assert Decimal(payload["summary"]["equity"]) == 33800
+    assert len(payload["flows"]) == 2
+    assert len(payload["period_flows"]) == 1

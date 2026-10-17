@@ -70,6 +70,8 @@ def validate_portfolio_period(value):
     if not isinstance(value, dict) or value.get("status") not in {"complete", "unavailable"}:
         raise ValueError("Некорректный статус результата портфеля")
     result = dict(value)
+    if result.get("cash_flow_mode", "auto") not in {"auto", "manual"}:
+        raise ValueError("Некорректный источник внешних движений")
     currency = _currency(result.get("base_currency"))
     for name in MONEY_FIELDS:
         raw = result.get(name)

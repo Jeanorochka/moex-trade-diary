@@ -42,6 +42,68 @@ def test_form_builds_complete_noninteractive_export_request(config):
     ]
 
 
+def test_manual_flows_replace_mode_and_keep_dated_deposit_withdrawal_signs(config):
+    argv = arguments(config, cash_flow_mode="manual", cash_flows=[
+        {"date": "01.01.26", "kind": "deposit", "amount": "1 000,50"},
+        {"date": "17.10.2026", "kind": "withdrawal", "amount": "25.01"},
+    ])
+    assert argv[-6:] == [
+        "--cash-flow-mode", "manual", "--cash-flow", "01.01.2026:+1000.50",
+        "--cash-flow", "17.10.2026:-25.01",
+    ]
+
+
+def test_explicit_manual_empty_list_means_zero_external_flows(config):
+    argv = arguments(config, cash_flow_mode="manual")
+    assert argv[-2:] == ["--cash-flow-mode", "manual"]
+    assert "--cash-flow" not in argv
+
+
+def test_auto_mode_ignores_retained_manual_rows_without_validating_or_mutating_them(config):
+    rows = [{"date": "outside-period", "kind": "withdrawal", "amount": "0"}]
+    assert arguments(config, cash_flow_mode="auto", cash_flows=rows) == arguments(config)
+    assert rows == [{"date": "outside-period", "kind": "withdrawal", "amount": "0"}]
+
+
+def test_manual_identical_cash_flows_are_kept_as_two_distinct_instructions(config):
+    row = {"date": "01.06.26", "kind": "deposit", "amount": "100"}
+    argv = arguments(config, cash_flow_mode="manual", cash_flows=[row, dict(row)])
+    assert argv.count("--cash-flow") == 2
+    assert argv.count("01.06.2026:+100") == 2
+
+
+@pytest.mark.parametrize("mode", ["", "both", None, "supplement"])
+def test_form_rejects_ambiguous_cash_flow_mode(config, mode):
+    with pytest.raises(ValueError, match="автоматический или ручной"):
+        arguments(config, cash_flow_mode=mode)
+
+
+@pytest.mark.parametrize("amount", ["", "0", "-1", "NaN", "Infinity", "oops", "0.0000000000000000001", "100000000000000000000"])
+def test_manual_cash_flow_requires_positive_finite_representable_amount(config, amount):
+    with pytest.raises(ValueError, match="Операция 1.*положительную сумму"):
+        arguments(config, cash_flow_mode="manual", cash_flows=[
+            {"date": "01.06.26", "kind": "deposit", "amount": amount},
+        ])
+
+
+@pytest.mark.parametrize("row", [
+    {"date": "31.12.25", "kind": "deposit", "amount": "1"},
+    {"date": "18.10.26", "kind": "deposit", "amount": "1"},
+    {"date": "31.02.26", "kind": "deposit", "amount": "1"},
+    {"date": "01.06.26", "kind": "transfer", "amount": "1"},
+    {"date": "01.06.26", "amount": "1"},
+    {}, None,
+])
+def test_manual_cash_flow_rejects_invalid_dates_directions_and_missing_fields(config, row):
+    with pytest.raises(ValueError, match="Операция 1"):
+        arguments(config, cash_flow_mode="manual", cash_flows=[row])
+
+
+def test_manual_mode_requires_a_row_collection(config):
+    with pytest.raises(ValueError, match="список"):
+        arguments(config, cash_flow_mode="manual", cash_flows={"date": "01.06.26"})
+
+
 @pytest.mark.parametrize("capital", ["", " ", "0", "-1", "NaN", "Infinity", "oops", "0.0000000000000000001", "100000000000000000000"])
 def test_form_requires_positive_representable_starting_capital(config, capital):
     with pytest.raises(ValueError, match="капитал"):
@@ -177,3 +239,51 @@ def test_export_worker_reports_parser_exit_and_restores_streams(config):
     assert any(kind == "error" for kind, _ in events)
     assert sys.stdout is stdout
     assert sys.stderr is stderr
+
+
+def test_hidden_tk_manual_form_preserves_draft_and_fits_window(config, monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    create_window = tk.Tk
+
+    def hidden_window(*args, **options):
+        window = create_window(*args, **options)
+        window.withdraw()
+        return window
+
+    monkeypatch.setattr(tk, "Tk", hidden_window)
+    monkeypatch.setattr(gui, "_read_config", lambda root: {"app": {"timezone": "Europe/Moscow"}})
+    try:
+        application = gui._Window(config.parent)
+    except tk.TclError as error:
+        pytest.skip(f"Tk display unavailable: {error}")
+    try:
+        application.window.update_idletasks()
+        assert application.window.winfo_reqwidth() <= 700
+        assert application.window.winfo_reqheight() <= 760
+        assert application.cash_flow_mode.get() == "auto"
+        assert str(application.flow_amount_entry.cget("state")) == "disabled"
+        application.first.set("01.01.26")
+        application.last.set("17.10.26")
+        application.cash_flow_mode.set("manual")
+        application._cash_flow_mode_changed()
+        application.flow_date.set("01.06.26")
+        application.flow_amount.set("1 000,25")
+        application._add_cash_flow()
+        expected = [{"date": "01.06.2026", "kind": "deposit", "amount": "1000.25"}]
+        assert application.cash_flows == expected
+        assert application.cash_flow_list.size() == 1
+        application.cash_flow_mode.set("auto")
+        application._cash_flow_mode_changed()
+        application._remove_cash_flow()
+        assert application.cash_flows == expected
+        assert str(application.cash_flow_list.cget("state")) == "disabled"
+        application.cash_flow_mode.set("manual")
+        application._cash_flow_mode_changed()
+        application._set_busy(True)
+        assert str(application.flow_kind_box.cget("state")) == "disabled"
+        application._set_busy(False)
+        application.cash_flow_list.selection_set(0)
+        application._remove_cash_flow()
+        assert application.cash_flows == []
+    finally:
+        application.window.destroy()

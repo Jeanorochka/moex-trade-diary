@@ -19,6 +19,7 @@ from trade_exporter.exporters.portfolio import export_portfolio
 from trade_exporter.services.portfolio import analyze_portfolio, normalize_cash_flows
 from trade_exporter.services.risk import analyze_portfolio_risk
 from trade_exporter.services.performance import validate_portfolio_period
+from trade_exporter.services.manual_flows import manual_cash_flow_history
 
 
 def _datetime(value):
@@ -164,7 +165,14 @@ def prepare_portfolio_report(
     broker, account, output_dir: Path, *, captured_at=None,
     starting_capital=Decimal(0), capital_started_at=None, results=None,
     result_period_start=None, result_period_end=None, results_quality=(), progress=None,
+    cash_flow_mode="auto", manual_cash_flows=(),
 ):
+    if cash_flow_mode not in {"auto", "manual"}:
+        raise ValueError("Неизвестный источник внешних движений")
+    if cash_flow_mode == "auto" and manual_cash_flows:
+        raise ValueError("Ручные движения требуют режима manual")
+    if cash_flow_mode == "manual" and (starting_capital <= 0 or capital_started_at is None):
+        raise ValueError("Для ручных движений нужны стартовый капитал и его дата")
     status = progress or (lambda message: None)
     status("Получение текущей стоимости и открытых позиций")
     snapshot = load_portfolio(broker, account, captured_at=captured_at)
@@ -194,7 +202,7 @@ def prepare_portfolio_report(
         period_history = history
         period_error = None
         try:
-            if len(records) > 1 and not history.complete and history_error is None:
+            if cash_flow_mode == "auto" and len(records) > 1 and not history.complete and history_error is None:
                 period_history = load_cash_flows(
                     broker, account, _datetime(records[0]["captured_at"]), snapshot.captured_at + timedelta(microseconds=1),
                     require_inception=False,
@@ -213,7 +221,7 @@ def prepare_portfolio_report(
     risk_history = history
     if starting_capital > 0 and capital_started_at is not None:
         status("Расчёт от введённого стартового капитала")
-        if not history.complete or history.started_at is None or history.started_at > capital_started_at:
+        if cash_flow_mode == "auto" and (not history.complete or history.started_at is None or history.started_at > capital_started_at):
             try:
                 risk_history = load_cash_flows(
                     broker, account, capital_started_at, snapshot.captured_at + timedelta(microseconds=1),
@@ -249,6 +257,21 @@ def prepare_portfolio_report(
             valuation_basis = "unavailable_historical_nav"
             valuation_source = ""
             valuation_quality.append(f"Оценка портфеля на выбранную конечную дату не получена: {error}")
+    if cash_flow_mode == "manual":
+        entered = manual_cash_flow_history(manual_cash_flows, capital_started_at, evaluation_at, snapshot.base_currency)
+        internal = tuple(
+            replace(flow, id=f"broker:{flow.id}") for flow in risk_history.flows
+            if flow.kind != "external" and capital_started_at < flow.timestamp <= evaluation_at
+        )
+        risk_history = CashFlowHistory(
+            tuple(sorted((*internal, *entered.flows), key=lambda flow: flow.timestamp)),
+            entered.complete, entered.reasons, entered.started_at,
+        )
+        period, quality = observed_performance(
+            records, risk_history.flows, ledger_complete=risk_history.complete, ledger_start=risk_history.started_at,
+        )
+        report.summary["observed_period"] = period
+        report.summary["period_quality"] = list(dict.fromkeys([*quality, *risk_history.reasons]))
     period_flows = tuple(
         flow for flow in risk_history.flows
         if (capital_started_at is None or flow.timestamp > capital_started_at) and flow.timestamp <= evaluation_at
@@ -261,6 +284,7 @@ def prepare_portfolio_report(
     report.summary["period_ledger_complete"] = risk_history.complete
     report.summary["period_ledger_start"] = risk_history.started_at.isoformat() if risk_history.started_at else None
     report.summary["period_cash_flow_quality"] = list(risk_history.reasons)
+    report.summary["period_cash_flow_mode"] = cash_flow_mode
     report.summary["starting_capital"] = starting_capital
     report.summary["capital_started_at"] = capital_started_at.isoformat() if capital_started_at else None
     report.summary["result_period_start"] = (result_period_start or capital_started_at).isoformat() if result_period_start or capital_started_at else None
@@ -279,6 +303,10 @@ def prepare_portfolio_report(
         starting_capital=starting_capital, capital_started_at=capital_started_at, results=results,
     )
     metrics = {row["metric"]: row for row in report.summary["risk"]["metrics"]}
+    if cash_flow_mode == "manual":
+        for name, row in metrics.items():
+            if name.startswith("capital_") or name == "annualized_dietz_return":
+                row["quality_reason"] = " ".join(filter(None, (row.get("quality_reason"), *risk_history.reasons)))
     if ending_equity is None:
         for name, row in metrics.items():
             if name.startswith("capital_") or name == "current_equity":
@@ -306,6 +334,8 @@ def prepare_portfolio_report(
         "xirr": metrics["capital_period_xirr"]["value"] if complete else None,
         "days": (evaluation_at - capital_started_at).total_seconds() / 86400 if capital_started_at else None,
         "valuation_basis": valuation_basis, "source": valuation_source, "quality": period_quality,
+        "cash_flow_mode": cash_flow_mode,
+        "cash_flow_basis": "Полный ручной журнал пользователя; даты движений учитываются на конец дня." if cash_flow_mode == "manual" else "Внешние движения из истории брокера за выбранный период.",
     })
     report.summary["risk"]["quality"].extend(
         reason for reason in risk_history.reasons if reason not in report.summary["risk"]["quality"]
