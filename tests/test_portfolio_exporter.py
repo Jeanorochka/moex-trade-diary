@@ -304,3 +304,59 @@ def test_profit_to_net_funding_ratio_is_not_labelled_investment_return(tmp_path)
     summary = pl.read_excel(workbook, sheet_name="Портфель")
     ratio = summary.filter(pl.col("показатель") == "Отношение прибыли к чистым взносам")
     assert ratio["значение"].to_list() == ["20,00%"]
+
+
+def test_risk_sheet_has_numeric_values_units_methods_and_missing_var_reason(tmp_path):
+    value = report()
+    value.summary["risk"] = {
+        "basis": "portfolio_snapshot_and_observed_nav", "as_of": "2026-10-17T12:00:00+00:00",
+        "metrics": [
+            {"metric": "max_drawdown_observed", "label": "Максимальная просадка наблюдаемого портфеля", "value": Decimal("0.04"), "unit": "fraction", "method": "Индекс стоимости с учетом внешних движений", "observations": 8, "basis": "actual_nav", "quality_reason": "Между снимками просадка не наблюдается."},
+            {"metric": "historical_var95_1d_money", "label": "Исторический VaR 95% за день", "value": None, "unit": "RUB", "method": "Исторические однодневные изменения стоимости", "observations": 7, "basis": "actual_nav", "quality_reason": "Нужно не менее 20 дневных наблюдений доходности."},
+            {"metric": "adverse_position_shock_5pct", "label": "Потеря при неблагоприятном изменении позиций на 5%", "value": Decimal("1310"), "unit": "RUB", "method": "Сценарий изменения известных вложений", "observations": 2, "basis": "scenario", "quality_reason": "Сценарная оценка; не VaR."},
+            {"metric": "capital_period_annualized", "label": "Текущий результат в годовом темпе", "value": Decimal("0.2"), "unit": "fraction", "method": "Геометрическая экстраполяция результата периода", "observations": 1, "basis": "annualized_extrapolation", "quality_reason": "Экстраполяция; не прогноз."},
+        ], "quality": ["Параметры рассчитаны только по доступным наблюдениям."],
+    }
+    workbook, json_path, html_path = export_portfolio(value, tmp_path)
+    frame = pl.read_excel(workbook, sheet_name="Риск и доходность")
+    assert frame["значение"].to_list() == [0.04, None, 1310, 0.2]
+    assert frame.schema["значение"].is_numeric()
+    assert frame["единица"].to_list() == ["%", "RUB", "RUB", "%"]
+    assert frame["наблюдений"].to_list() == [8, 7, 2, 1]
+    assert "20 дневных" in frame["качество данных"][1]
+    assert frame["основание"][2] == "Сценарий изменения позиций; не VaR"
+    assert "не прогноз" in frame["основание"][3]
+    payload = orjson.loads(json_path.read_bytes())
+    assert Decimal(payload["summary"]["risk"]["metrics"][0]["value"]) == Decimal("0.04")
+    text = html_path.read_text(encoding="utf-8")
+    assert "Риск и доходность" in text
+    assert "4,00%" in text
+    assert "20 дневных наблюдений" in text
+    assert "Сценарная оценка; не VaR." in text
+    with ZipFile(workbook) as archive:
+        namespace = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        book = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+        sheet_id = next(int(sheet.get("sheetId")) for sheet in book.find("s:sheets", namespace) if sheet.get("name") == "Риск и доходность")
+        sheet = ElementTree.fromstring(archive.read(f"xl/worksheets/sheet{sheet_id}.xml"))
+        cell = sheet.find(".//s:c[@r='B2']", namespace)
+        assert cell.get("t") not in {"s", "inlineStr"}
+        assert Decimal(cell.find("s:v", namespace).text) == Decimal("0.04")
+        assert sheet.find(".//s:c[@r='B3']/s:v", namespace) is None
+
+
+def test_initial_capital_risk_basis_and_labels_are_preserved(tmp_path):
+    value = report()
+    value.summary["risk"] = {
+        "as_of": value.summary["captured_at"], "metrics": [{
+            "metric": "capital_period_return", "label": "Доходность от введенного начального капитала",
+            "value": Decimal("0.1"), "unit": "fraction", "method": "С учетом движений за период",
+            "observations": 1, "basis": "starting_capital_assumption", "quality_reason": "Начальная стоимость задана пользователем.",
+        }], "quality": [],
+    }
+    workbook, _, html_path = export_portfolio(value, tmp_path)
+    frame = pl.read_excel(workbook, sheet_name="Риск и доходность")
+    assert frame["основание"].to_list() == ["От введенного начального капитала"]
+    assert frame["значение"].to_list() == [0.1]
+    text = html_path.read_text(encoding="utf-8")
+    assert "Доходность от введенного начального капитала" in text
+    assert "10,00%" in text

@@ -83,7 +83,7 @@ def test_year_old_unsold_share_is_valued_from_current_broker_portfolio(broker_na
     broker.list_accounts = lambda: [account]
     broker.get_fills = lambda **kwargs: pytest.fail("an unsold holding does not need a closing trade")
     monkeypatch.setattr(cli, "create_broker", lambda *args: broker)
-    monkeypatch.setattr(cli, "execute_portfolio", lambda *args: execute_portfolio(*args, captured_at=NOW))
+    monkeypatch.setattr(cli, "execute_portfolio", lambda *args, **kwargs: execute_portfolio(*args, **kwargs, captured_at=NOW))
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     paths = cli.main(["--portfolio", "--broker", broker_name, "--config", str(config), "--account-id", "1", "--output-dir", str(tmp_path)])

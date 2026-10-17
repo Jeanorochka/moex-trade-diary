@@ -9,10 +9,14 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from trade_exporter.brokers.finam_reports import FinamReports
+from trade_exporter.brokers.portfolio import load_cash_flows
+from trade_exporter.exporters.analytics import analysis_metadata
 from trade_exporter.exporters.excel import write_workbook
+from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
 from trade_exporter.services.analytics import AnalysisReport, analyze_results
 from trade_exporter.services.finam_report import parse_finam_margins
 from trade_exporter.services.matcher import FifoMatcher
+from trade_exporter.services.risk import analyze_result_risk
 
 
 ZERO = Decimal("0")
@@ -33,6 +37,7 @@ EXECUTION_SCHEMA = {
     "количество": pl.Int64,
     "цена исполнения": pl.Float64,
     "комиссия": pl.Float64,
+    "статус комиссии": pl.String,
     "валюта цены": pl.String,
     "валюта комиссии": pl.String,
     "идентификатор сделки": pl.String,
@@ -54,12 +59,69 @@ def _future(asset: dict) -> bool:
     return "future" in kind or "фьючер" in kind
 
 
+def _unsupported_price(error: RuntimeError, symbol: str) -> bool:
+    message = str(error)
+    return (
+        message.startswith(f"Finam: для {symbol} (")
+        and message.endswith("задай подтверждённый price_multipliers; денежная цена не определена")
+    ) or message == f"Finam: {symbol} содержит НКД; расчёт P&L с НКД не поддерживается"
+
+
 def _display(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.with_columns(
         pl.col(name).cast(pl.Float64)
         for name, dtype in frame.schema.items()
         if isinstance(dtype, pl.Decimal)
     )
+
+
+def _commission(broker, raw: dict) -> tuple[Decimal | None, str]:
+    fee = raw.get("commission")
+    if not isinstance(fee, dict):
+        return None, ""
+    value = fee.get("value")
+    if value is None or isinstance(value, dict) and value.get("value") is None:
+        return None, str(fee.get("currency") or "").upper()
+    return broker._decimal(value, "commission.value").copy_abs(), str(fee.get("currency") or "").upper()
+
+
+def _fee_events(broker, account, start, end, display_timezone) -> tuple[list[dict], list[dict], bool, list[str]]:
+    try:
+        history = load_cash_flows(broker, account, start, end, require_inception=False)
+    except Exception:
+        return [], [], False, [
+            "Комиссии исполнений не переданы API; денежные операции за выбранный период недоступны. Результат показан без неизвестных расходов.",
+        ]
+    reasons = list(history.reasons)
+    rows = []
+    grouped = defaultdict(lambda: [ZERO, ZERO])
+    for flow in history.flows:
+        if flow.kind != "fee" or not start <= flow.timestamp < end:
+            continue
+        if flow.currency != "RUB":
+            reasons.append(f"Комиссии в {flow.currency} не пересчитаны в RUB и не включены в результат.")
+            continue
+        rows.append({
+            "дата": flow.timestamp.astimezone(display_timezone).date(),
+            "время": flow.timestamp.isoformat(),
+            "сумма": float(flow.amount),
+            "валюта": flow.currency,
+            "идентификатор операции": flow.id,
+        })
+        key = flow.timestamp.astimezone(display_timezone).date()
+        with localcontext() as context:
+            context.prec = 80
+            grouped[key][0] += max(flow.amount, ZERO)
+            grouped[key][1] += max(-flow.amount, ZERO)
+    events = [{
+        "date": day, "ticker": "КОМИССИИ ФИНАМ", "entry_price": None, "exit_price": None,
+        "gross_pnl": _money_text(amounts[0]), "commission": _money_text(amounts[1]),
+        "event_type": "broker_fee",
+    } for day, amounts in sorted(grouped.items()) if any(amounts)]
+    complete = history.complete and not reasons
+    if not complete:
+        reasons.append("Результат уменьшен только на известные рублёвые расходы; полные комиссии не подтверждены.")
+    return events, rows, complete, list(dict.fromkeys(reasons))
 
 
 def _execution(broker, raw: dict, display_timezone) -> dict:
@@ -73,11 +135,7 @@ def _execution(broker, raw: dict, display_timezone) -> dict:
         raise RuntimeError(f"Finam: количество {symbol} должно быть положительным целым числом штук")
     price = broker._decimal(raw.get("price"), "price")
     currency = str(raw.get("currency") or "").upper()
-    fee = raw.get("commission")
-    if not isinstance(fee, dict):
-        raise RuntimeError(f"Finam: отсутствует комиссия исполнения {symbol}")
-    commission = broker._decimal(fee.get("value"), "commission.value").copy_abs()
-    fee_currency = str(fee.get("currency") or "").upper()
+    commission, fee_currency = _commission(broker, raw)
     if not currency or (commission and not fee_currency):
         raise RuntimeError(f"Finam: отсутствует валюта исполнения или комиссии {symbol}")
     local = timestamp.astimezone(display_timezone)
@@ -88,14 +146,15 @@ def _execution(broker, raw: dict, display_timezone) -> dict:
         "сторона": side,
         "количество": int(quantity),
         "цена исполнения": float(price),
-        "комиссия": float(commission),
+        "комиссия": float(commission) if commission is not None else None,
+        "статус комиссии": "передана API" if commission is not None else "не передана API",
         "валюта цены": currency,
         "валюта комиссии": fee_currency,
         "идентификатор сделки": raw["trade_id"],
     }
 
 
-def _closed_rows(closed, display_timezone) -> pl.DataFrame:
+def _closed_rows(closed, display_timezone, *, allocated_fees=True) -> pl.DataFrame:
     rows = []
     for trade in closed:
         rows.append({
@@ -104,10 +163,10 @@ def _closed_rows(closed, display_timezone) -> pl.DataFrame:
             "цена входа": float(trade.entry_price),
             "цена выхода": float(trade.exit_price),
             "финрез": float(trade.gross_pnl),
-            "комиссия": float(trade.commission),
+            "комиссия": float(trade.commission) if allocated_fees else None,
             "направление": trade.direction,
             "количество": trade.quantity,
-            "финрез net": float(trade.net_pnl),
+            "финрез net": float(trade.net_pnl) if allocated_fees else None,
         })
     return pl.DataFrame(rows, schema={
         "дата": pl.String, "тикер": pl.String, "цена входа": pl.Float64,
@@ -166,6 +225,15 @@ def execute_finam(
         else period_from - timedelta(days=lookback_days)
     )
     raw = broker.load_trades(account.id, history_from, period_to_exclusive)
+    selected_symbols = {
+        trade.get("symbol") for trade in raw
+        if period_from <= broker._timestamp(trade.get("timestamp")) < period_to_exclusive
+    }
+    transaction_fees = any(_commission(broker, trade)[0] is None for trade in raw)
+    synthetic_ids = getattr(broker, "history_quality", {}).get(account.id, {}).get("synthetic_trade_ids", 0)
+    execution_quality = [
+        f"Брокер не передал ID для {synthetic_ids} исполнений; назначены локальные ID, одинаковые исполнения сохранены.",
+    ] if synthetic_ids else []
     assets = {}
     future_positions = set()
     positions = getattr(broker, "_account_positions", {}).get(account.id, [])
@@ -181,6 +249,7 @@ def execute_finam(
         if _future(asset):
             future_positions.add(symbol)
     stock_fills = []
+    excluded_symbols = {}
     futures = []
     stock_currencies = defaultdict(set)
     execution_rows = []
@@ -196,13 +265,24 @@ def execute_finam(
         selected = period_from <= timestamp < period_to_exclusive
         if _future(asset):
             futures.append(trade)
-        else:
-            fill = broker._fill(account.id, trade)
-            stock_fills.append(fill)
-            stock_currencies[symbol].add(fill.currency.upper())
+        elif symbol in selected_symbols and symbol not in excluded_symbols:
+            matcher_trade = trade
+            if transaction_fees:
+                matcher_trade = {**trade, "commission": {
+                    "value": {"value": "0"}, "currency": str(trade.get("currency") or "").upper(),
+                }}
+            try:
+                fill = broker._fill(account.id, matcher_trade)
+            except RuntimeError as error:
+                if not _unsupported_price(error, symbol):
+                    raise
+                excluded_symbols[symbol] = str(error)
+            else:
+                stock_fills.append(fill)
+                stock_currencies[symbol].add(fill.currency.upper())
         if selected:
             execution_rows.append(_execution(broker, trade, display_timezone))
-            if _future(asset):
+            if _future(asset) and not transaction_fees:
                 fee = trade["commission"]
                 commission = broker._decimal(fee.get("value"), "commission.value").copy_abs()
                 if commission and str(fee.get("currency") or "").upper() != "RUB":
@@ -212,6 +292,11 @@ def execute_finam(
                     context.prec = 80
                     future_fees[key] += commission
 
+    result_quality = [
+        f"{symbol}: исполнения сохранены, но весь инструмент исключён из P&L. {reason}. Общий результат рассчитан частично."
+        for symbol, reason in sorted(excluded_symbols.items())
+    ]
+    stock_fills = [fill for fill in stock_fills if fill.instrument_id not in excluded_symbols]
     closed = [
         trade for trade in FifoMatcher().match(stock_fills)
         if period_from <= trade.exit_at < period_to_exclusive
@@ -268,11 +353,41 @@ def execute_finam(
                 "event_type": "futures_margin" if has_margin else "futures_fee",
             })
 
+    fee_rows = []
+    commission_complete = True
+    quality = []
+    if transaction_fees:
+        fee_events, fee_rows, commission_complete, quality = _fee_events(
+            broker, account, period_from, period_to_exclusive, display_timezone,
+        )
+        events.extend(fee_events)
     report = analyze_results(pl.DataFrame(events, schema=RESULT_SCHEMA), starting_capital)
-    if not has_futures:
+    report.summary.update({
+        "commission_complete": commission_complete,
+        "commission_basis": "transactions_period" if transaction_fees else "execution_fifo_and_futures",
+        "commission_quality": quality,
+        "net_pnl_basis": "gross_less_known_fees" if not commission_complete else "gross_less_fees",
+        "synthetic_trade_ids": synthetic_ids,
+        "execution_quality": execution_quality,
+        "result_complete": not result_quality,
+        "result_quality": result_quality,
+        "excluded_instruments": sorted(excluded_symbols),
+    })
+    risk = analyze_result_risk(report.daily, starting_capital, period_from, period_to_exclusive)
+    if not commission_complete:
+        reason = "Комиссии неполны: расчёт основан на результате после известных расходов."
+        risk["quality"].append(reason)
+        for metric in risk["metrics"]:
+            metric["quality_reason"] = " ".join(filter(None, (metric.get("quality_reason"), reason)))
+    for reason in result_quality:
+        risk["quality"].append(reason)
+        for metric in risk["metrics"]:
+            metric["quality_reason"] = " ".join(filter(None, (metric.get("quality_reason"), reason)))
+    report.summary["risk"] = risk
+    if not has_futures and not transaction_fees and not execution_quality and not result_quality:
         path = exporter.export(
             closed, broker.name, account.id, period_from,
-            period_to_exclusive - timedelta(microseconds=1), display_timezone,
+            period_to_exclusive - timedelta(microseconds=1), display_timezone, risk=risk,
         )
         return path, report, report_paths
 
@@ -283,20 +398,45 @@ def execute_finam(
         "date": pl.Date, "ticker": pl.String, "gross_pnl": pl.Decimal(38, 18),
         "currency": pl.String, "source_id": pl.String, "source_file": pl.String,
     })
-    explanation = pl.DataFrame({
-        "раздел": ["Акции", "Фьючерсы", "Итог портфеля"],
-        "основа расчёта": [
-            "Реализованный FIFO P&L закрытых сделок после комиссий.",
-            "Вариационная маржа, включая открытые позиции: оплаченная плюс изменение неоплаченной; комиссии исполнений отдельно.",
-            "Рублёвый результат акций и фьючерсов. Вводы, выводы, дивиденды, проценты и налоги в этот итог не входят.",
-        ],
-    })
-    write_workbook(path, {
-        "Сделки": _closed_rows(closed, display_timezone),
+    basis_rows = [
+        ("Акции", "Валовой реализованный FIFO P&L закрытых сделок." if transaction_fees else "Реализованный FIFO P&L закрытых сделок после комиссий."),
+        ("Фьючерсы", "Вариационная маржа, включая открытые позиции: оплаченная плюс изменение неоплаченной; комиссии учтены отдельно."),
+        ("Итог портфеля", "Рублёвый результат акций и фьючерсов. Вводы, выводы, дивиденды, проценты и налоги в этот итог не входят."),
+    ]
+    if transaction_fees:
+        basis_rows.extend([
+            ("Комиссии", "Денежные расходы и возвраты расходов из Transactions за выбранный период, включая неторговые сборы. Комиссии исполнений повторно не вычитаются."),
+            ("Комиссии отдельных сделок", "API не передал все комиссии исполнений. Расходы из денежных операций не распределены по отдельным сделкам; их net P&L не определён."),
+            ("Полнота расходов", "Подтверждена история денежных операций за выбранный период." if commission_complete else "Не подтверждена. Результат после известных комиссий является частичным."),
+        ])
+        basis_rows.extend(("Качество данных", reason) for reason in quality)
+    basis_rows.extend(("Идентификаторы исполнений", reason) for reason in execution_quality)
+    basis_rows.extend(("Полнота результата", reason) for reason in result_quality)
+    explanation = pl.DataFrame(basis_rows, schema={"раздел": pl.String, "основа расчёта": pl.String}, orient="row")
+    result_frame = _display(report.trades)
+    if transaction_fees:
+        result_frame = result_frame.with_columns(
+            pl.when(pl.col("event_type") == "stock_fifo").then(pl.lit("валовой FIFO; расходы отдельными строками"))
+            .when(pl.col("event_type") == "broker_fee").then(pl.lit("известные расходы и возвраты из Transactions"))
+            .otherwise(pl.lit("вариационная маржа; расходы отдельными строками")).alias("основа комиссии"),
+            pl.lit("полные расходы" if commission_complete else "только известные расходы").alias("полнота расходов"),
+        )
+    if result_quality:
+        result_frame = result_frame.with_columns(pl.lit("частичный; неподдержанные инструменты исключены").alias("полнота результата"))
+    sheets = {
+        "Сделки": _closed_rows(closed, display_timezone, allocated_fees=not transaction_fees),
         "Исполнения ФИНАМ": pl.DataFrame(execution_rows, schema=EXECUTION_SCHEMA),
         "Фьючерсы": _display(margin_frame),
         "Итог портфеля": _display(report.daily),
-        "Результаты": _display(report.trades),
+        "Результаты": result_frame,
         "Основа расчёта": explanation,
-    })
+        "Параметры расчёта": analysis_metadata(report.summary),
+    }
+    if transaction_fees:
+        sheets["Денежные комиссии"] = pl.DataFrame(fee_rows, schema={
+            "дата": pl.Date, "время": pl.String, "сумма": pl.Float64,
+            "валюта": pl.String, "идентификатор операции": pl.String,
+        })
+    sheets["Риск и доходность"] = risk_sheet(risk)
+    write_workbook(path, sheets, sheet_options={"Риск и доходность": risk_sheet_options(risk)})
     return path, report, report_paths

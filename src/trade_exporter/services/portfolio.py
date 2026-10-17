@@ -298,6 +298,7 @@ def analyze_portfolio(
             "valuation_residual_threshold": residual_threshold,
             "valuation_reconciliation_status": "reconciled" if reconciled else "unexplained_balance" if components_complete else "partial_components",
             "positions_count": len(rows),
+            "derivative_positions_count": sum(_derivative(row["asset_type"]) for row in rows),
             "priced_positions_count": sum(row["market_value"] is not None and row["valuation_currency"] == snapshot.base_currency for row in rows),
             "unvalued_positions_count": sum(row["market_value"] is None or row["valuation_currency"] != snapshot.base_currency for row in rows),
             "long_market_value": long_value, "short_market_value": short_value,

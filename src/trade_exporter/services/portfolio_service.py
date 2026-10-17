@@ -14,6 +14,7 @@ from trade_exporter.brokers.portfolio import CashFlowHistory, load_cash_flows, l
 from trade_exporter.domain.portfolio import CashFlow, PortfolioSnapshot
 from trade_exporter.exporters.portfolio import export_portfolio
 from trade_exporter.services.portfolio import analyze_portfolio, normalize_cash_flows
+from trade_exporter.services.risk import analyze_portfolio_risk
 
 
 def _datetime(value):
@@ -155,9 +156,16 @@ def observed_performance(records: list[dict], flows: tuple[CashFlow, ...], *, le
         }, ([] if weighted_capital > 0 else ["Доходность не определена: взвешенный вложенный капитал неположительный."])
 
 
-def execute_portfolio(broker, account, output_dir: Path, *, captured_at=None):
+def execute_portfolio(
+    broker, account, output_dir: Path, *, captured_at=None,
+    starting_capital=Decimal(0), capital_started_at=None, results=None,
+    result_period_start=None, result_period_end=None, results_quality=(), progress=None,
+):
+    status = progress or (lambda message: None)
+    status("Получение текущей стоимости и открытых позиций")
     snapshot = load_portfolio(broker, account, captured_at=captured_at)
     history_error = None
+    status("Получение денежных операций")
     try:
         if account.opened_at is None:
             history = CashFlowHistory((), False, ("Неизвестна дата открытия счёта; доходность за всю историю не определена.",), None)
@@ -198,6 +206,36 @@ def execute_portfolio(broker, account, output_dir: Path, *, captured_at=None):
     report.summary["valuation_history"] = records
     report.summary["observed_period"] = period
     report.summary["period_quality"] = quality
+    risk_history = history
+    if starting_capital > 0 and capital_started_at is not None:
+        status("Расчёт от введённого стартового капитала")
+        if not history.complete or history.started_at is None or history.started_at > capital_started_at:
+            try:
+                risk_history = load_cash_flows(
+                    broker, account, capital_started_at, snapshot.captured_at + timedelta(microseconds=1),
+                    require_inception=False,
+                )
+            except RuntimeError:
+                risk_history = CashFlowHistory((), False, ("Денежные операции периода не получены; изменение капитала может включать пополнения и выводы.",), capital_started_at)
+    report.summary["starting_capital"] = starting_capital
+    report.summary["capital_started_at"] = capital_started_at.isoformat() if capital_started_at else None
+    report.summary["result_period_start"] = (result_period_start or capital_started_at).isoformat() if result_period_start or capital_started_at else None
+    report.summary["result_period_end"] = result_period_end.isoformat() if result_period_end else None
+    report.summary["risk"] = analyze_portfolio_risk(
+        report.summary, risk_history.flows,
+        ledger_complete=risk_history.complete, ledger_start=risk_history.started_at,
+        starting_capital=starting_capital, capital_started_at=capital_started_at, results=results,
+    )
+    report.summary["risk"]["quality"].extend(
+        reason for reason in risk_history.reasons if reason not in report.summary["risk"]["quality"]
+    )
+    if results_quality:
+        reason = "Ряд денежных результатов: " + " ".join(results_quality)
+        report.summary["risk"]["quality"].append(reason)
+        for row in report.summary["risk"]["metrics"]:
+            if row["metric"].startswith("proxy_"):
+                row["quality_reason"] = " ".join(filter(None, (row.get("quality_reason"), reason)))
     prefix = f"portfolio_{snapshot.broker}_{sha256(snapshot.account_id.encode()).hexdigest()[:8]}"
+    status("Сохранение портфеля, финансовых показателей и графиков")
     paths = export_portfolio(report, output_dir, prefix=prefix)
     return report, paths

@@ -43,7 +43,7 @@ def test_export_and_analyze_share_selected_closed_trades(tmp_path, monkeypatch):
             return [make_fill(9, Side.BUY, "100"), make_fill(10, Side.SELL, "110")]
 
     monkeypatch.setattr(cli, "create_broker", lambda *args: Broker())
-    monkeypatch.setattr(cli, "print_portfolio", lambda *args: ())
+    monkeypatch.setattr(cli, "print_portfolio", lambda *args, **kwargs: ())
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     path = cli.main([
@@ -107,7 +107,7 @@ def test_current_portfolio_does_not_prompt_dates_or_request_closed_trades(broker
     requests = []
     expected = (tmp_path / "portfolio.xlsx", tmp_path / "portfolio.json", tmp_path / "portfolio.html")
     monkeypatch.setattr(cli, "create_broker", lambda *args: Broker())
-    monkeypatch.setattr(cli, "print_portfolio", lambda *args: requests.append(args) or expected)
+    monkeypatch.setattr(cli, "print_portfolio", lambda *args, **kwargs: requests.append(args) or expected)
     monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("standalone portfolio prompted date"))
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")

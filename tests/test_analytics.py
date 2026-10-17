@@ -305,3 +305,34 @@ def test_csv_keeps_precise_numeric_text(tmp_path):
     path = tmp_path / "diary.csv"
     diary([("01.01.26", "A", "1", "2", "0.300000000000000001", "0.3")]).write_csv(path)
     assert analyze_file(path).summary["net_pnl"] == Decimal("0.000000000000000001")
+
+
+@pytest.mark.parametrize("parameters", [
+    [("commission_complete", "0")],
+    [("commission_complete", '"false"')],
+    [("commission_complete", "not json")],
+    [("commission_complete", "false"), ("commission_complete", "true")],
+    [("commission_complete", "false"), ("commission_quality", '[1]')],
+    [("commission_basis", '"transactions_period"')],
+])
+def test_invalid_commission_metadata_cannot_silently_become_complete_costs(tmp_path, parameters):
+    path = tmp_path / "invalid_metadata.xlsx"
+    xlsxturbo.dfs_to_xlsx([
+        (diary([("01.01.26", "A", "1", "2", "10", "1")]), "Сделки"),
+        (pl.DataFrame(parameters, schema={"ключ": pl.String, "значение": pl.String}, orient="row"), "Параметры расчёта"),
+    ], str(path))
+    with pytest.raises(ValueError, match="Некорректные параметры расчёта"):
+        analyze_file(path)
+
+
+def test_incomplete_cost_flag_alone_survives_offline_with_clear_reason(tmp_path):
+    path = tmp_path / "partial_metadata.xlsx"
+    xlsxturbo.dfs_to_xlsx([
+        (diary([("01.01.26", "A", "1", "2", "10", "1")]), "Сделки"),
+        (pl.DataFrame({"ключ": ["commission_complete"], "значение": ["false"]}), "Параметры расчёта"),
+    ], str(path))
+    report = analyze_file(path)
+    assert report.summary["net_pnl"] == 9
+    assert report.summary["commission_complete"] is False
+    assert report.summary["net_pnl_basis"] == "gross_less_known_fees"
+    assert report.summary["commission_quality"]

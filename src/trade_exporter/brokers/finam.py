@@ -45,6 +45,7 @@ class FinamBroker(BrokerAdapter):
         )
         self._asset_cache: dict[tuple[str, str], dict] = {}
         self._account_positions: dict[str, list[dict]] = {}
+        self.history_quality: dict[str, dict[str, int]] = {}
         raw_multipliers = settings.get("price_multipliers", {})
         if not isinstance(raw_multipliers, dict):
             raise ValueError("Finam price_multipliers должен быть таблицей symbol@MIC -> множитель")
@@ -303,14 +304,30 @@ class FinamBroker(BrokerAdapter):
             raw.extend(self._load_window(account_id, start, stop))
             start = stop
         unique = {}
-        for trade in raw:
+        synthetic_count = 0
+        raw.sort(key=lambda trade: self._timestamp_key(trade["timestamp"]))
+        for occurrence, trade in enumerate(raw, 1):
             trade_id = trade.get("trade_id")
-            if not isinstance(trade_id, str) or not trade_id:
-                raise RuntimeError("Finam: отсутствует trade_id, полнота истории не подтверждена")
-            key = (trade.get("symbol"), trade_id)
+            if isinstance(trade_id, int) and not isinstance(trade_id, bool):
+                trade_id = str(trade_id)
+            elif isinstance(trade_id, str):
+                trade_id = trade_id.strip()
+            elif trade_id is not None:
+                raise RuntimeError("Finam: trade_id должен быть строкой или целым числом")
+            if not trade_id:
+                synthetic_count += 1
+                trade = {
+                    **trade, "trade_id": f"synthetic:{occurrence}",
+                    "trade_id_source": "response_occurrence",
+                }
+                key = ("response_occurrence", occurrence)
+            else:
+                trade = {**trade, "trade_id": trade_id}
+                key = ("broker", trade.get("symbol"), trade_id)
             if key in unique and unique[key] != trade:
                 raise RuntimeError("Finam: противоречивые данные для одного trade_id")
             unique.setdefault(key, trade)
+        self.history_quality.setdefault(account_id, {})["synthetic_trade_ids"] = synthetic_count
         return sorted(unique.values(), key=lambda trade: self._timestamp_key(trade["timestamp"]))
 
     def get_fills(self, account_id: str, date_from: datetime, date_to: datetime) -> list[Fill]:

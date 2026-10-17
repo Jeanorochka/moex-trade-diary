@@ -7,6 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import fastexcel
+import orjson
 import polars as pl
 
 from trade_exporter.domain.models import ClosedTrade
@@ -335,5 +336,43 @@ def analyze_file(
     frame = load_diary(path)
     normalized = {COLUMN_NAMES.get(name.strip().lower(), name.strip().lower()) for name in frame.columns}
     if "event_type" in normalized:
-        return analyze_results(frame, starting_capital)
-    return analyze_frame(frame, starting_capital)
+        report = analyze_results(frame, starting_capital)
+    else:
+        report = analyze_frame(frame, starting_capital)
+    path = Path(path)
+    if path.suffix.lower() != ".xlsx" or "Параметры расчёта" not in fastexcel.read_excel(path).sheet_names:
+        return report
+    try:
+        parameters = pl.read_excel(path, sheet_name="Параметры расчёта", engine="calamine", infer_schema_length=None)
+        if parameters.columns != ["ключ", "значение"]:
+            raise ValueError("требуются колонки ключ и значение")
+        metadata = {}
+        types = {
+            "commission_complete": bool, "commission_basis": str,
+            "commission_quality": list, "net_pnl_basis": str,
+            "synthetic_trade_ids": int, "execution_quality": list,
+            "result_complete": bool, "result_quality": list, "excluded_instruments": list,
+        }
+        for key, raw in parameters.iter_rows():
+            if key not in types:
+                continue
+            if key in metadata:
+                raise ValueError(f"повторяющийся параметр {key}")
+            if not isinstance(raw, str):
+                raise ValueError(f"параметр {key} должен содержать JSON")
+            value = orjson.loads(raw)
+            if type(value) is not types[key]:
+                raise ValueError(f"неверный тип параметра {key}")
+            if key in {"commission_quality", "execution_quality", "result_quality", "excluded_instruments"} and any(not isinstance(reason, str) for reason in value):
+                raise ValueError("причины неполноты должны быть текстом")
+            metadata[key] = value
+        if metadata and "commission_complete" not in metadata:
+            raise ValueError("не указана полнота комиссий")
+        if metadata.get("commission_complete") is False:
+            metadata["net_pnl_basis"] = "gross_less_known_fees"
+            if not metadata.get("commission_quality"):
+                metadata["commission_quality"] = ["Полные комиссии исходной выгрузки не подтверждены; учтены только известные расходы."]
+        report.summary.update(metadata)
+    except (ValueError, TypeError, pl.exceptions.PolarsError) as error:
+        raise ValueError(f"Некорректные параметры расчёта в {path.name}: {error}") from error
+    return report

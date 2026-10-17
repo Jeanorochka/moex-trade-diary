@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import orjson
+import polars as pl
 import pytest
 
 from trade_exporter.domain.models import Account
@@ -188,3 +189,37 @@ def test_process_lock_is_released_after_failed_history_validation(tmp_path):
         service.record_snapshot(snapshot(START, "200"), tmp_path)
     records = service.record_snapshot(snapshot(START + timedelta(days=1), "120"), tmp_path)
     assert len(records) == 2
+
+
+def test_entered_capital_gives_annualized_return_in_the_first_export(tmp_path, monkeypatch):
+    account = Account("1", "test", "tbank", opened_at=START)
+    end = START + timedelta(days=365)
+    monkeypatch.setattr(service, "load_portfolio", lambda *a, **k: snapshot(end, "1200"))
+    monkeypatch.setattr(service, "load_cash_flows", lambda *a, **k: service.CashFlowHistory((), True, (), START))
+    report, paths = service.execute_portfolio(
+        object(), account, tmp_path, starting_capital=Decimal("1000"), capital_started_at=START,
+    )
+    metrics = {row["metric"]: row for row in report.summary["risk"]["metrics"]}
+    assert report.summary["observed_period"] is None
+    assert metrics["capital_period_profit"]["value"] == 200
+    assert metrics["capital_period_return"]["value"] == pytest.approx(0.2)
+    assert metrics["capital_period_annualized"]["value"] == pytest.approx(0.2)
+    assert "Риск и доходность" in pl.read_excel(paths[0], sheet_id=0)
+
+
+def test_entered_capital_uses_period_flows_without_initial_funding_history(tmp_path, monkeypatch):
+    account = Account("1", "test", "finam", opened_at=START - timedelta(days=365))
+    end = START + timedelta(days=10)
+    monkeypatch.setattr(service, "load_portfolio", lambda *a, **k: snapshot(end, "230"))
+
+    def cash_flows(broker, account, start, stop, *, require_inception=True):
+        if require_inception:
+            return service.CashFlowHistory((), False, ("Начальное пополнение недоступно.",), account.opened_at)
+        return service.CashFlowHistory((CashFlow(START + timedelta(days=5), Decimal(100), "RUB"),), True, (), START)
+
+    monkeypatch.setattr(service, "load_cash_flows", cash_flows)
+    report, _ = service.execute_portfolio(object(), account, tmp_path, starting_capital=Decimal(100), capital_started_at=START)
+    metrics = {row["metric"]: row for row in report.summary["risk"]["metrics"]}
+    assert report.summary["lifetime_profit"] is None
+    assert metrics["capital_period_profit"]["value"] == 30
+    assert metrics["capital_period_return"]["value"] == pytest.approx(0.2)

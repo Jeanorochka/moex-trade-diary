@@ -10,8 +10,11 @@ import pytest
 
 from trade_exporter.brokers.finam import FinamBroker
 from trade_exporter.domain.models import Account
+from trade_exporter.domain.portfolio import CashFlow
+from trade_exporter.brokers.portfolio import CashFlowHistory
 from trade_exporter.exporters.excel import ExcelExporter
 from trade_exporter.services import finam_service
+from trade_exporter.services.analytics import analyze_file
 from trade_exporter.services.finam_service import execute_finam
 
 
@@ -279,3 +282,257 @@ def test_future_intraday_period_is_rejected_before_report_creation(reports, tmp_
     with pytest.raises(ValueError, match="полные календарные дни"):
         execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START + timedelta(hours=1), END, UTC)
     assert reports.calls == []
+
+
+def without_fee(trade):
+    result = deepcopy(trade)
+    result.pop("commission")
+    return result
+
+
+def fee_history(monkeypatch, flows=(), *, complete=True, reasons=()):
+    calls = []
+
+    def load(broker, account, start, end, *, require_inception):
+        calls.append((account.id, start, end, require_inception))
+        return CashFlowHistory(tuple(flows), complete, tuple(reasons), start)
+
+    monkeypatch.setattr(finam_service, "load_cash_flows", load)
+    return calls
+
+
+def test_missing_trade_commissions_use_period_cash_expenses_without_fabricating_trade_fees(reports, tmp_path, monkeypatch):
+    trades = [
+        without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 10, 1, "2025-12-31T12:00:00Z")),
+        without_fee(execution("sell", "SBER@MISX", "SIDE_SELL", 110, 10, 1, "2026-01-01T12:00:00Z")),
+    ]
+    broker = Broker(trades)
+    calls = fee_history(monkeypatch, [
+        CashFlow(START + timedelta(hours=15), Decimal("-2.5"), "RUB", "fee", "fee1"),
+        CashFlow(START + timedelta(hours=16), Decimal("1000"), "RUB", "external", "deposit"),
+        CashFlow(START - timedelta(hours=1), Decimal("-99"), "RUB", "fee", "outside"),
+        CashFlow(END, Decimal("-99"), "RUB", "fee", "end"),
+    ])
+    path, report, sources = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC, Decimal("1000"))
+    assert report.summary["gross_pnl"] == 100
+    assert report.summary["commission"] == Decimal("2.5")
+    assert report.summary["net_pnl"] == Decimal("97.5")
+    assert report.summary["commission_complete"] is True
+    assert report.summary["commission_basis"] == "transactions_period"
+    assert report.trades["event_type"].to_list() == ["stock_fifo", "broker_fee"]
+    assert calls == [("123", START, END, False)]
+    assert sources == reports.calls == []
+    assert "commission" not in broker.trades[0]
+    sheets = pl.read_excel(path, sheet_id=0, engine="calamine")
+    assert sheets["Сделки"]["комиссия"].to_list() == [None]
+    assert sheets["Сделки"]["финрез net"].to_list() == [None]
+    assert sheets["Исполнения ФИНАМ"]["комиссия"].to_list() == [None]
+    assert sheets["Исполнения ФИНАМ"]["статус комиссии"].to_list() == ["не передана API"]
+    assert sheets["Денежные комиссии"]["сумма"].to_list() == [-2.5]
+    assert "Риск и доходность" in sheets
+    offline = analyze_file(path)
+    assert offline.summary["net_pnl"] == Decimal("97.5")
+    assert offline.summary["commission_complete"] is True
+    assert offline.summary["commission_basis"] == "transactions_period"
+
+
+def test_one_missing_historical_commission_switches_all_fees_to_cash_basis(reports, tmp_path, monkeypatch):
+    broker = Broker([
+        without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 9, "2025-12-31T12:00:00Z")),
+        execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 9, "2026-01-01T12:00:00Z"),
+    ])
+    fee_history(monkeypatch, [CashFlow(START, Decimal("-2"), "RUB", "fee", "fee")])
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["commission"] == 2
+    assert report.summary["net_pnl"] == 8
+    assert pl.read_excel(path, sheet_name="Исполнения ФИНАМ")["комиссия"].to_list() == [9]
+
+
+def test_missing_futures_fees_are_not_counted_twice_with_transactions(reports, tmp_path, monkeypatch):
+    reports.margins = [margin(date(2026, 1, 1), 75)]
+    broker = Broker([
+        without_fee(execution("old", "SiZ6@RTSX", "SIDE_BUY", 100, 1, 9, "2025-12-31T12:00:00Z", "USD")),
+        execution("sell", "SiZ6@RTSX", "SIDE_SELL", 110, 1, 9, "2026-01-01T12:00:00Z", "USD"),
+    ])
+    fee_history(monkeypatch, [CashFlow(START, Decimal("-3"), "RUB", "fee", "fee")])
+    _, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["gross_pnl"] == 75
+    assert report.summary["commission"] == 3
+    assert report.summary["net_pnl"] == 72
+    assert report.trades.filter(pl.col("event_type") == "futures_margin")["commission"].to_list() == [0]
+
+
+def test_cash_fee_refund_preserves_signed_economic_effect(reports, tmp_path, monkeypatch):
+    broker = Broker([without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z"))])
+    fee_history(monkeypatch, [
+        CashFlow(START, Decimal("-5"), "RUB", "fee", "charge"),
+        CashFlow(START, Decimal("2"), "RUB", "fee", "refund"),
+    ])
+    _, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["gross_pnl"] == 2
+    assert report.summary["commission"] == 5
+    assert report.summary["net_pnl"] == -3
+
+
+def test_unavailable_transactions_export_gross_with_explicit_incomplete_costs(reports, tmp_path, monkeypatch):
+    broker = Broker([
+        without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z")),
+        without_fee(execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 1, "2026-01-01T12:00:00Z")),
+    ])
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("synthetic unavailable")
+
+    monkeypatch.setattr(finam_service, "load_cash_flows", unavailable)
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert path.is_file()
+    assert report.summary["net_pnl"] == 10
+    assert report.summary["commission_complete"] is False
+    assert report.summary["net_pnl_basis"] == "gross_less_known_fees"
+    assert report.summary["commission_quality"]
+    assert all("Комиссии неполны" in metric["quality_reason"] for metric in report.summary["risk"]["metrics"])
+    explanation = pl.read_excel(path, sheet_name="Основа расчёта")
+    assert any("частичным" in text for text in explanation["основа расчёта"])
+    offline = analyze_file(path)
+    assert offline.summary["net_pnl"] == 10
+    assert offline.summary["commission_complete"] is False
+    assert offline.summary["commission_quality"] == report.summary["commission_quality"]
+
+
+def test_incomplete_or_foreign_fee_history_retains_only_known_ruble_costs(reports, tmp_path, monkeypatch):
+    broker = Broker([without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z"))])
+    fee_history(monkeypatch, [
+        CashFlow(START, Decimal("-2"), "RUB", "fee", "ruble"),
+        CashFlow(START, Decimal("-3"), "USD", "fee", "foreign"),
+    ], complete=False, reasons=["Неизвестный тип денежной операции внутри периода"])
+    _, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["commission"] == 2
+    assert report.summary["net_pnl"] == -2
+    assert report.summary["commission_complete"] is False
+    assert any("USD" in reason for reason in report.summary["commission_quality"])
+    assert any("Неизвестный тип" in reason for reason in report.summary["commission_quality"])
+
+
+def test_complete_execution_fees_do_not_request_cash_history(reports, tmp_path, monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Complete execution fees must keep the existing FIFO basis")
+
+    monkeypatch.setattr(finam_service, "load_cash_flows", unexpected)
+    broker = Broker([
+        execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z"),
+        execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 1, "2026-01-01T12:00:00Z"),
+    ])
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["commission_complete"] is True
+    assert report.summary["commission_basis"] == "execution_fifo_and_futures"
+    assert report.summary["net_pnl"] == 8
+    assert "Риск и доходность" in pl.read_excel(path, sheet_id=0)
+
+
+def test_empty_complete_cash_history_confirms_zero_period_expense(reports, tmp_path, monkeypatch):
+    broker = Broker([without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z"))])
+    fee_history(monkeypatch)
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["commission_complete"] is True
+    assert report.summary["commission"] == 0
+    assert report.summary["commission_quality"] == []
+    assert report.trades.is_empty()
+    assert pl.read_excel(path, sheet_name="Исполнения ФИНАМ")["комиссия"].to_list() == [None]
+
+
+def test_local_execution_ids_are_explained_and_preserved_offline(reports, tmp_path):
+    broker = Broker([execution("local:1", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z")])
+    broker.history_quality = {"123": {"synthetic_trade_ids": 3}}
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["synthetic_trade_ids"] == 3
+    assert "Брокер не передал ID для 3 исполнений" in report.summary["execution_quality"][0]
+    basis = pl.read_excel(path, sheet_name="Основа расчёта")
+    assert any("одинаковые исполнения сохранены" in text for text in basis["основа расчёта"])
+    offline = analyze_file(path)
+    assert offline.summary["execution_quality"] == report.summary["execution_quality"]
+    assert offline.summary["synthetic_trade_ids"] == 3
+
+
+class PriceBroker(Broker):
+    def __init__(self, trades, multipliers=None):
+        super().__init__(trades)
+        self.assets["BOND@MISX"] = {"type": "BONDS", "ticker": "BOND", "mic": "MISX"}
+        self._price_multipliers = multipliers or {}
+
+    def _price_factor(self, symbol, asset, executed_at):
+        self.factor_calls.append(symbol)
+        return FinamBroker._price_factor(self, symbol, asset, executed_at)
+
+
+def test_irrelevant_old_bond_does_not_block_selected_stock_reconstruction(reports, tmp_path):
+    broker = PriceBroker([
+        execution("oldbond", "BOND@MISX", "SIDE_BUY", 100, 1, 1, "2025-06-01T12:00:00Z"),
+        execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z"),
+        execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 1, "2026-01-01T12:00:00Z"),
+    ])
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["net_pnl"] == 8
+    assert report.summary["result_complete"] is True
+    assert report.summary["result_quality"] == []
+    assert "BOND@MISX" not in broker.factor_calls
+    assert path.exists()
+
+
+def test_selected_unsupported_bond_preserves_executions_and_marks_partial_result(reports, tmp_path):
+    broker = PriceBroker([
+        execution("bondbuy", "BOND@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-30T12:00:00Z"),
+        execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z"),
+        execution("bondsell", "BOND@MISX", "SIDE_SELL", 101, 1, 1, "2026-01-01T12:00:00Z"),
+        execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 1, "2026-01-01T13:00:00Z"),
+    ])
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["net_pnl"] == 8
+    assert report.summary["result_complete"] is False
+    assert report.summary["excluded_instruments"] == ["BOND@MISX"]
+    assert "price_multipliers" in report.summary["result_quality"][0]
+    assert report.trades["ticker"].to_list() == ["SBER@MISX"]
+    assert all("BOND@MISX" in item["quality_reason"] for item in report.summary["risk"]["metrics"])
+    sheets = pl.read_excel(path, sheet_id=0)
+    assert set(sheets["Исполнения ФИНАМ"]["инструмент"]) == {"BOND@MISX", "SBER@MISX"}
+    assert any("весь инструмент исключён" in reason for reason in sheets["Основа расчёта"]["основа расчёта"])
+    offline = analyze_file(path)
+    assert offline.summary["result_complete"] is False
+    assert offline.summary["result_quality"] == report.summary["result_quality"]
+    assert offline.summary["excluded_instruments"] == ["BOND@MISX"]
+
+
+def test_selected_configured_bond_keeps_confirmed_monetary_multiplier(reports, tmp_path):
+    broker = PriceBroker([
+        execution("buy", "BOND@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z"),
+        execution("sell", "BOND@MISX", "SIDE_SELL", 101, 1, 1, "2026-01-01T12:00:00Z"),
+    ], {"BOND@MISX": Decimal("10")})
+    _, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.summary["gross_pnl"] == 10
+    assert report.summary["net_pnl"] == 8
+    assert report.summary["result_complete"] is True
+
+
+def test_nkd_in_later_fill_excludes_all_previous_fills_of_that_symbol(reports, tmp_path):
+    accrued = execution("last", "BOND@MISX", "SIDE_SELL", 102, 6, 1, "2026-01-02T12:00:00Z")
+    accrued["accrued_interest"] = {"value": "2"}
+    broker = PriceBroker([
+        execution("buy", "BOND@MISX", "SIDE_BUY", 100, 10, 1, "2025-12-31T12:00:00Z"),
+        execution("first", "BOND@MISX", "SIDE_SELL", 101, 4, 1, "2026-01-01T12:00:00Z"),
+        accrued,
+    ], {"BOND@MISX": Decimal("10")})
+    path, report, _ = execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)
+    assert report.trades.is_empty()
+    assert report.summary["result_complete"] is False
+    assert "НКД" in report.summary["result_quality"][0]
+    assert pl.read_excel(path, sheet_name="Исполнения ФИНАМ").height == 2
+
+
+def test_generic_api_error_is_not_misclassified_as_unsupported_instrument(reports, tmp_path, monkeypatch):
+    broker = PriceBroker([execution("buy", "BOND@MISX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z")])
+
+    def unavailable(*args):
+        raise RuntimeError("Finam API 401: unavailable")
+
+    monkeypatch.setattr(broker, "_price_factor", unavailable)
+    with pytest.raises(RuntimeError, match="Finam API 401"):
+        execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, START, END, UTC)

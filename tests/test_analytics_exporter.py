@@ -8,7 +8,7 @@ import polars as pl
 
 from trade_exporter.domain.models import ClosedTrade
 from trade_exporter.exporters.analytics import export_analysis
-from trade_exporter.services.analytics import analyze_trades
+from trade_exporter.services.analytics import analyze_file, analyze_trades
 
 
 def make_report():
@@ -33,7 +33,7 @@ def test_report_contains_readable_sheets_and_native_charts(tmp_path):
     report = make_report()
     workbook, json_path = export_analysis(report, tmp_path)
     sheets = pl.read_excel(workbook, sheet_id=0, engine="calamine")
-    assert list(sheets) == ["Аналитика", "Сделки", "Дни", "Месяцы", "Тикеры"]
+    assert list(sheets) == ["Аналитика", "Сделки", "Дни", "Месяцы", "Тикеры"] + (["Риск и доходность"] if report.summary.get("risk") is not None else [])
     assert sheets["Дни"]["финрез net"].to_list() == [-11, 19]
     assert sheets["Дни"]["просадка"].to_list() == [11, 0]
     assert sheets["Тикеры"]["финрез net"].sum() == 8
@@ -75,3 +75,53 @@ def test_reports_do_not_overwrite_previous_results(tmp_path):
     second = export_analysis(make_report(), tmp_path)
     assert set(first).isdisjoint(second)
     assert all(path.exists() for path in (*first, *second))
+
+
+def test_trade_risk_sheet_marks_closed_pnl_as_proxy_and_keeps_numbers(tmp_path):
+    report = make_report()
+    report.summary["risk"] = {
+        "basis": "closed_pnl_proxy", "as_of": "2026-09-12",
+        "metrics": [
+            {"metric": "proxy_max_drawdown", "label": "Просадка накопленного результата закрытых строк", "value": Decimal("11"), "unit": "RUB", "method": "Накопленный net P&L закрытых строк", "observations": 2, "basis": "closed_pnl_proxy", "quality_reason": "Без переоценки открытых позиций."},
+            {"metric": "proxy_var95_1d_money", "label": "VaR 95% по дневным результатам строк", "value": None, "unit": "RUB", "method": "Исторический расчет по закрытым результатам", "observations": 2, "basis": "closed_pnl_proxy", "quality_reason": "Недостаточно дневных результатов; не риск всего портфеля."},
+        ], "quality": [],
+    }
+    workbook, json_path = export_analysis(report, tmp_path)
+    risk = pl.read_excel(workbook, sheet_name="Риск и доходность")
+    assert risk["значение"].to_list() == [11, None]
+    assert risk.schema["значение"].is_numeric()
+    assert all("без полной переоценки портфеля" in basis for basis in risk["основание"])
+    assert risk["качество данных"][0] == "Без переоценки открытых позиций."
+    summary = pl.read_excel(workbook, sheet_name="Аналитика")
+    assert "risk" not in summary["показатель"].to_list()
+    assert "Просадка накопленного результата по дням" in summary["показатель"].to_list()
+    payload = orjson.loads(json_path.read_bytes())
+    assert Decimal(payload["summary"]["risk"]["metrics"][0]["value"]) == 11
+    assert payload["summary"]["risk"]["metrics"][1]["value"] is None
+
+
+def test_partial_commission_metadata_is_readable_and_does_not_become_a_numeric_metric(tmp_path):
+    report = make_report()
+    report.summary.update({
+        "commission_complete": False,
+        "commission_basis": "transactions_period",
+        "commission_quality": ["История денежных расходов за период не подтверждена."],
+        "net_pnl_basis": "gross_less_known_fees",
+    })
+    workbook, json_path = export_analysis(report, tmp_path)
+    sheets = pl.read_excel(workbook, sheet_id=0)
+    labels = sheets["Аналитика"]["показатель"].to_list()
+    assert "Результат после известных комиссий; расходы неполны" in labels
+    assert "commission_complete" not in labels
+    assert "commission_basis" not in labels
+    assert "финрез после известных комиссий" in sheets["Дни"].columns
+    basis = sheets["Основа расчёта"]["основа расчёта"].to_list()
+    assert any("по отдельным сделкам не распределены" in value for value in basis)
+    assert "История денежных расходов за период не подтверждена." in basis
+    payload = orjson.loads(json_path.read_bytes())
+    assert payload["summary"]["commission_complete"] is False
+    assert payload["summary"]["commission_basis"] == "transactions_period"
+    offline = analyze_file(workbook)
+    assert offline.summary["commission_complete"] is False
+    assert offline.summary["commission_basis"] == "transactions_period"
+    assert offline.summary["net_pnl"] == report.summary["net_pnl"]

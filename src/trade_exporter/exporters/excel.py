@@ -68,6 +68,8 @@ class ExcelExporter:
         period_from: datetime,
         period_to_inclusive: datetime,
         display_timezone,
+        *,
+        risk: dict | None = None,
     ) -> Path:
         path = self._new_file_path(
             broker_name,
@@ -135,6 +137,11 @@ class ExcelExporter:
                     },
                 },
             }
+        if risk is not None:
+            from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
+
+            sheets["Риск и доходность"] = risk_sheet(risk)
+            options["Риск и доходность"] = risk_sheet_options(risk)
         return write_workbook(path, sheets, sheet_options=options)
 
     def _new_file_path(

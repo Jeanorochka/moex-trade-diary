@@ -91,6 +91,14 @@ VALUES = {
     "evidenced_external_funding": "Внешние внесения подтверждены", "empty_zero_equity": "Счет без капитала",
     "missing_inception_funding": "Исходные внесения не подтверждены",
 }
+RISK_BASES = {
+    "actual_nav": "Фактическая стоимость портфеля с учетом движений",
+    "closed_pnl_proxy": "Накопленный результат строк; без полной переоценки портфеля",
+    "scenario": "Сценарий изменения позиций; не VaR",
+    "annualized_extrapolation": "Экстраполяция в годовой темп; не прогноз",
+    "money_weighted_xirr": "Доходность с учетом дат денежных движений",
+    "starting_capital_assumption": "От введенного начального капитала",
+}
 CSS = """
 :root{color-scheme:light;--ink:#14263b;--muted:#697b8f;--line:#e3eaf0;--green:#158875;--red:#bf5d6a;--paper:#f4f7fa;--white:#fff}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 "Segoe UI",Arial,sans-serif;font-variant-numeric:tabular-nums}a{color:inherit;text-decoration:none}button,input{font:inherit}button{cursor:pointer}main{max-width:1360px;margin:auto;padding:32px 36px 48px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:25px}.brand{display:flex;align-items:center;gap:11px;font-weight:650;letter-spacing:.04em}.brand-mark{background:var(--ink);color:white;display:grid;place-items:center;width:34px;height:34px;border-radius:10px;font-size:18px}.downloads{display:flex;gap:9px}.downloads a{background:white;border:1px solid var(--line);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600}.hero{background:#142b40;color:white;border-radius:20px;padding:30px 32px;display:flex;align-items:center;justify-content:space-between;gap:24px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:360px;height:360px;border:70px solid #ffffff05;border-radius:100%;right:80px;top:-120px;pointer-events:none}.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-size:11px;font-weight:650;color:#91b8c6}.hero h1{font-size:16px;font-weight:500;margin:10px 0 5px;color:#d2e1e9}.equity{font-size:48px;line-height:1.15;font-weight:650;letter-spacing:-.04em}.hero-meta{color:#abc2cf;margin-top:14px;font-size:12px}.hero-side{text-align:right;position:relative;z-index:1}.hero-side strong{display:block;font-size:14px;font-weight:500}.hero-side span{color:#abc2cf;font-size:12px}.hero-tag{display:inline-block;background:#ffffff0d;border:1px solid #ffffff16;padding:5px 11px;border-radius:20px;font-size:11px;margin-bottom:13px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:18px 0 24px}.stat{background:white;border:1px solid var(--line);border-radius:13px;padding:18px 21px}.label{font-size:12px;color:var(--muted)}.stat strong{display:block;font-size:25px;letter-spacing:-.025em;margin:5px 0}.caption{font-size:11px;color:var(--muted)}.positive{color:var(--green)}.negative{color:var(--red)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.panel{background:white;border:1px solid var(--line);border-radius:15px;padding:23px 25px;min-width:0}.panel h2{font-size:16px;font-weight:650;margin:0 0 3px;letter-spacing:-.015em}.sub{color:var(--muted);font-size:11px;margin:0 0 20px}.legend{display:flex;gap:17px;font-size:11px;color:var(--muted);margin:12px 0 0}.dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}.green{background:#238f81}.red{background:#c66a78}.gray{background:#bdcbd7}.svg-chart{width:100%;height:auto;display:block}.empty{min-height:180px;display:grid;align-content:center;justify-items:center;text-align:center;color:var(--muted);font-size:13px}.empty span{font-size:11px;margin-top:7px}.table-panel{margin-top:20px;padding:0;overflow:hidden}.table-top{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:22px 25px 17px}.table-top .sub{margin:2px 0 0}.search{border:1px solid var(--line);border-radius:8px;background:#fafcfd;padding:9px 12px;width:230px;outline:none}.search:focus{border-color:#93b8c4}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:right;color:var(--muted);font-weight:500;font-size:10px;padding:12px 17px;background:#f8fafc;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}td{text-align:right;padding:15px 17px;border-bottom:1px solid #edf1f5;font-size:12px}th:first-child,td:first-child{text-align:left;padding-left:25px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#fafcfe}.instrument{font-weight:650;font-size:13px}.instrument-sub{display:block;color:var(--muted);font-size:10px;font-weight:400;max-width:210px;overflow:hidden;text-overflow:ellipsis}.cell-note{display:block;color:var(--muted);font-size:10px}.table-foot{padding:12px 25px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.bottom{margin-top:20px;grid-template-columns:1.15fr .85fr}.funding{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:15px 0 22px}.funding strong{font-size:20px;display:block;margin-top:5px}.profit{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line);padding-top:18px}.profit strong{font-size:25px}.meta{display:grid;grid-template-columns:1fr 1.2fr;gap:10px 18px;font-size:11px;margin-top:18px}.meta dt{color:var(--muted)}.meta dd{margin:0;text-align:right;overflow-wrap:anywhere}.footer{font-size:10px;color:#8594a4;display:flex;justify-content:space-between;gap:20px;margin-top:23px}.cash-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.cash-item{background:#f2f6f9;border-radius:5px;padding:3px 7px;font-size:10px;color:var(--muted)}[hidden]{display:none!important}@media(max-width:900px){main{padding:22px 18px}.grid,.bottom{grid-template-columns:1fr}.hero{padding:25px}.equity{font-size:39px}.stat{padding:15px}.stat strong{font-size:21px}}@media(max-width:560px){.top{align-items:flex-start}.downloads a{padding:7px 9px}.brand{font-size:11px}.hero-side{display:none}.hero{padding:24px}.equity{font-size:34px}.stats{grid-template-columns:1fr;gap:9px}.stat{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}.stat strong{grid-column:2;grid-row:1/3;text-align:right;margin:0;align-self:center}.caption{grid-column:1}.panel{padding:20px}.table-top{flex-direction:column;align-items:stretch}.search{width:100%}.funding{grid-template-columns:1fr;gap:12px}.funding>div{display:flex;justify-content:space-between;align-items:center}.funding strong{font-size:17px;margin:0}.footer{flex-direction:column;gap:3px}}@media print{body{background:white}main{padding:0}.downloads,.search{display:none}.panel,.stat,.hero{break-inside:avoid}.grid{grid-template-columns:1fr 1fr}.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}.table-wrap{overflow:visible}th,td{padding:8px;font-size:9px}.instrument{font-size:10px}.instrument-sub{font-size:8px}.footer{margin-top:10px}}
@@ -137,6 +145,91 @@ def _summary_value(key, value):
     if isinstance(value, (Decimal, float)):
         return _fmt(value, percent=key in PERCENTAGES)
     return VALUES.get(str(value), str(value))
+
+
+def risk_sheet(risk: dict) -> pl.DataFrame:
+    rows = []
+    for item in risk.get("metrics", []):
+        value = item.get("value")
+        rows.append({
+            "показатель": str(item.get("label") or item["metric"]),
+            "значение": float(value) if value is not None else None,
+            "единица": "%" if item.get("unit") == "fraction" else "дней" if item.get("unit") == "days" else "шт." if item.get("unit") == "count" else str(item.get("unit") or ""),
+            "метод": str(item.get("method") or ""),
+            "наблюдений": item.get("observations"),
+            "на дату": str(item.get("as_of") or risk.get("as_of") or ""),
+            "основание": RISK_BASES.get(item.get("basis"), str(item.get("basis") or "")),
+            "качество данных": str(item.get("quality_reason") or ""),
+        })
+    return pl.DataFrame(rows, schema={
+        "показатель": pl.String, "значение": pl.Float64, "единица": pl.String,
+        "метод": pl.String, "наблюдений": pl.UInt64, "на дату": pl.String,
+        "основание": pl.String, "качество данных": pl.String,
+    })
+
+
+def risk_sheet_options(risk: dict) -> dict:
+    return {
+        "column_widths": {0: 56, 1: 21, 2: 12, 3: 65, 4: 14, 5: 29, 6: 65, 7: 75},
+        "column_formats": {
+            "значение": {"num_format": "#,##0.00"},
+            "наблюдений": {"num_format": "0"},
+            "метод": {"wrap_text": True},
+            "основание": {"wrap_text": True},
+            "качество данных": {"wrap_text": True},
+        },
+        "cells": {
+            f"B{index + 2}": {"value": float(item["value"]), "num_format": "0.00%"}
+            for index, item in enumerate(risk.get("metrics", []))
+            if item.get("unit") == "fraction" and item.get("value") is not None
+        },
+    }
+
+
+def _risk_html(risk):
+    if not risk or not risk.get("metrics"):
+        return ""
+    frame = risk_sheet(risk)
+    metrics = {item["metric"]: item for item in risk["metrics"]}
+    selected = []
+    for names in (
+        ("capital_period_return",),
+        ("capital_period_annualized", "annualized_dietz_return", "annualized_money_weighted_return"),
+        ("max_drawdown_observed", "proxy_max_drawdown"),
+        ("historical_var95_1d_money", "proxy_var95_1d_money"),
+    ):
+        candidates = [metrics[name] for name in names if name in metrics]
+        if candidates:
+            selected.append(next((item for item in candidates if item.get("value") is not None), candidates[0]))
+
+    def number(item):
+        unit = item.get("unit")
+        return _fmt(
+            item.get("value"), unit if unit not in {"fraction", "days", "count"} else None,
+            percent=unit == "fraction", places=0 if unit == "count" else 2,
+        )
+
+    cards = ''.join(
+        '<div class="stat"><span class="label">' + escape(str(item.get("label") or item["metric"]))
+        + '</span><strong>' + escape(number(item)) + '</strong><span class="caption">'
+        + escape(str(item.get("quality_reason") or RISK_BASES.get(item.get("basis"), item.get("method") or ""))) + '</span></div>'
+        for item in selected
+    )
+    rows = ''.join(
+        '<tr><td style="white-space:normal;min-width:220px">' + escape(row["показатель"])
+        + '</td><td>' + escape(number(item)) + '</td><td style="text-align:left;white-space:normal;min-width:240px">'
+        + escape(row["метод"]) + '<span class="cell-note">' + escape(row["качество данных"])
+        + (' · ' if row["качество данных"] else '') + str(row["наблюдений"] if row["наблюдений"] is not None else "н/д")
+        + ' наблюдений</span></td><td style="text-align:left;white-space:normal;min-width:220px">'
+        + escape(row["основание"]) + '</td></tr>'
+        for row, item in zip(frame.to_dicts(), risk["metrics"])
+    )
+    quality = ' · '.join(str(value) for value in risk.get("quality", []))
+    return '<section class="panel" style="margin-top:20px"><h2>Риск и доходность</h2><p class="sub">Значения, методы расчета и доступность исходных данных</p>' + (
+        '<div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-bottom:14px">' + cards + '</div>' if cards else ''
+    ) + '<details><summary style="cursor:pointer;color:#456478;font-size:12px;padding:8px 0">Все параметры и основания расчета</summary><div class="table-wrap"><table><thead><tr><th>Показатель</th><th>Значение</th><th>Метод и данные</th><th>Основание</th></tr></thead><tbody>' + rows + '</tbody></table></div></details>' + (
+        '<p class="caption">' + escape(quality) + '</p>' if quality else ''
+    ) + '</section>'
 
 
 def _display(frame):
@@ -365,7 +458,7 @@ def _html(report, workbook_name, json_name, comparison):
 <section class="hero"><div><div class="eyebrow">Состояние на {escape(captured)}</div><h1>Капитал сейчас</h1><div class="equity">{money("equity")}</div><div class="hero-meta">Сводная оценка брокера · {escape(currency)}</div></div><div class="hero-side"><div class="hero-tag">Снимок портфеля</div><strong>{escape(str(summary.get("broker") or ""))}</strong><span>Счет {escape(str(summary.get("account_id") or ""))}</span></div></section>
 <div class="stats"><div class="stat"><span class="label">Деньги на счете</span><strong>{money("cash_base")}</strong><span class="caption">В валюте отчета</span></div><div class="stat"><span class="label">Стоимость позиций</span><strong>{money("positions_market_value")}</strong><span class="caption">{summary.get("priced_positions_count", 0)} позиций с денежной оценкой</span></div><div class="stat"><span class="label">Нереализованный результат</span><strong class="{_tone(unrealized)}">{escape(_fmt(unrealized, currency))}</strong><span class="caption">{escape(unrealized_caption)}</span></div></div>
 <div class="grid"><section class="panel"><h2>Структура вложений</h2><p class="sub">{escape(allocation_caption)} · денежная оценка в {escape(currency)}</p>{_allocation_svg(report.allocation, currency)}<div class="legend"><span><i class="dot green"></i>Длинные позиции</span><span><i class="dot red"></i>Короткие позиции</span></div></section><section class="panel"><h2>Покупка и стоимость сейчас</h2><p class="sub">{escape(cost_caption)}</p>{_comparison_svg(comparison, currency)}<div class="legend"><span><i class="dot gray"></i>Себестоимость</span><span><i class="dot green"></i>Текущая стоимость</span></div></section></div>{_history_panel(summary, _history(summary))}
-<section class="panel table-panel"><div class="table-top"><div><h2>Открытые позиции</h2><p class="sub">Цена покупки, текущая оценка и результат по каждому инструменту</p></div><input class="search" type="search" id="position-search" aria-label="Найти инструмент" placeholder="Найти инструмент…"></div><div class="table-wrap"><table id="holdings"><thead><tr><th>Инструмент</th><th>Количество</th><th>Средняя покупка</th><th>Цена сейчас</th><th>Себестоимость</th><th>Стоимость сейчас</th><th>Нереализованный результат</th><th>Доля капитала</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div><div class="table-foot">Нереализованный результат отражен отдельно. Капитал включает оценку брокера на дату снимка.</div></section>
+{_risk_html(summary.get("risk"))}<section class="panel table-panel"><div class="table-top"><div><h2>Открытые позиции</h2><p class="sub">Цена покупки, текущая оценка и результат по каждому инструменту</p></div><input class="search" type="search" id="position-search" aria-label="Найти инструмент" placeholder="Найти инструмент…"></div><div class="table-wrap"><table id="holdings"><thead><tr><th>Инструмент</th><th>Количество</th><th>Средняя покупка</th><th>Цена сейчас</th><th>Себестоимость</th><th>Стоимость сейчас</th><th>Нереализованный результат</th><th>Доля капитала</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div><div class="table-foot">Нереализованный результат отражен отдельно. Капитал включает оценку брокера на дату снимка.</div></section>
 <div class="grid bottom"><section class="panel"><h2>Движение капитала</h2><p class="sub">Пополнения и выводы за доступную историю счета</p><div class="funding">{funding}</div><div class="profit"><div><span class="label">Результат за всю историю</span><div class="caption">По капиталу и полной истории внешних движений</div></div><strong class="{_tone(profit)}">{escape(_fmt(profit, currency))}</strong></div>{ratios}<div class="cash-list">{cash}</div></section><section class="panel"><h2>Источники и оценка</h2><p class="sub">Основание цифр в этом снимке</p><dl class="meta">{meta}</dl>{quality_html}</section></div><div class="footer"><span>Снимок на {escape(captured)}. Цены и остатки относятся к указанной дате.</span><span>Портфель · {escape(currency)}</span></div></main>
 <script>const search=document.getElementById('position-search');search.addEventListener('input',()=>{{const value=search.value.toLocaleLowerCase('ru');document.querySelectorAll('#holdings tbody tr').forEach(row=>{{row.hidden=!row.textContent.toLocaleLowerCase('ru').includes(value)}})}});</script></body></html>'''
 
@@ -420,6 +513,9 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
     ]
     if quality_rows:
         sheets["Основания"] = pl.DataFrame(quality_rows, schema={"раздел": pl.String, "основание": pl.String}, orient="row")
+    risk = report.summary.get("risk")
+    if risk is not None:
+        sheets["Риск и доходность"] = risk_sheet(risk)
     options = {}
     for sheet_name, frame in sheets.items():
         formats = {}
@@ -432,6 +528,8 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
                 formats[column] = {"num_format": "#,##0.00"}
         options[sheet_name] = {"column_formats": formats, "column_widths": {"_all": 42}}
     options["Портфель"].update({"column_widths": {0: 52, 1: 42}})
+    if risk is not None:
+        options["Риск и доходность"] = risk_sheet_options(risk)
     if history.height >= 2:
         end = history.height + 1
         options["История стоимости"]["charts"] = {"E2": {

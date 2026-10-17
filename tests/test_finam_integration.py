@@ -22,7 +22,7 @@ UTC = timezone.utc
 @pytest.fixture
 def integration(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    def current_portfolio(broker, account, output_dir):
+    def current_portfolio(broker, account, output_dir, **options):
         snapshot = PortfolioSnapshot(account.id, broker.name, datetime.now(UTC), "RUB", Decimal(100), (CashBalance("RUB", Decimal(100)),), source="synthetic broker")
         report = analyze_portfolio(snapshot)
         return report, export_portfolio(report, output_dir)

@@ -19,6 +19,7 @@ from trade_exporter.services.export_service import ExportTradeHistory
 from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.portfolio_service import execute_portfolio
+from trade_exporter.services.risk import analyze_result_risk
 
 
 TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
@@ -39,6 +40,7 @@ def parse_args(argv=None):
     analysis.add_argument("--portfolio", action="store_true", help="Текущий портфель, переоценка позиций и доходность с учётом денежных потоков")
     parser.add_argument("--output-dir", type=Path, help="Каталог результатов")
     parser.add_argument("--starting-capital", default="0", help="Начальный капитал для относительных метрик")
+    parser.add_argument("--capital-from", help="Дата стартового капитала для текущего портфеля, dd.mm.yy")
     args = parser.parse_args(argv)
     try:
         args.starting_capital = Decimal(args.starting_capital)
@@ -46,7 +48,7 @@ def parse_args(argv=None):
         parser.error("Начальный капитал должен быть числом.")
     if not args.starting_capital.is_finite() or args.starting_capital < 0:
         parser.error("Начальный капитал должен быть конечным неотрицательным числом.")
-    if args.analyze and any((args.broker, args.token, args.account_id, args.date_from, args.date_to)):
+    if args.analyze and any((args.broker, args.token, args.account_id, args.date_from, args.date_to, args.capital_from)):
         parser.error("--analyze анализирует файл целиком; параметры брокера и дат к нему не применяются.")
     if args.portfolio and (args.date_from or args.date_to):
         parser.error("--portfolio получает текущую оценку; исторические даты относятся к выгрузке сделок.")
@@ -135,8 +137,8 @@ def print_analysis(report, output_dir):
     return workbook, json_path
 
 
-def print_portfolio(broker, account, output_dir):
-    report, paths = execute_portfolio(broker, account, output_dir)
+def print_portfolio(broker, account, output_dir, **options):
+    report, paths = execute_portfolio(broker, account, output_dir, **options)
     summary = report.summary
     currency = summary["base_currency"]
     print(f"\nТекущая стоимость портфеля: {summary['equity']:.2f} {currency}")
@@ -153,9 +155,11 @@ def print_portfolio(broker, account, output_dir):
     return paths
 
 
-def main(argv=None):
+def main(argv=None, *, progress=None):
+    status = progress or (lambda message: None)
     args = parse_args(argv)
     if args.analyze:
+        status("Анализ готового файла")
         report = analyze_file(args.analyze, starting_capital=args.starting_capital)
         print(f"Закрытых строк FIFO: {report.summary['trades']}")
         print(f"Net P&L: {report.summary['net_pnl']:.2f}")
@@ -173,9 +177,11 @@ def main(argv=None):
             raise ValueError("--token используется с --broker finam.")
         broker_settings["token"] = args.token
     print(f"Брокер: {BROKER_NAMES[broker_name]}")
+    status(f"Подключение: {BROKER_NAMES[broker_name]}")
     broker = create_broker(broker_name, broker_settings)
     tz = ZoneInfo(str(app_cfg.get("timezone", "Europe/Moscow")))
 
+    status("Получение списка счетов")
     accounts = broker.list_accounts()
     requested_id = args.account_id or str(app_cfg.get("default_account_id", "")).strip()
     if requested_id:
@@ -187,7 +193,16 @@ def main(argv=None):
 
     output_dir = args.output_dir or Path(str(app_cfg.get("output_dir", "exports")))
     if args.portfolio:
-        return print_portfolio(broker, account, output_dir)
+        if args.starting_capital > 0 and not args.capital_from:
+            raise ValueError("Для стартового капитала укажи его дату: --capital-from dd.mm.yy.")
+        baseline = parse_day(args.capital_from, tz) if args.capital_from else None
+        if baseline is not None and baseline > datetime.now(tz):
+            raise ValueError("Дата стартового капитала не может быть в будущем.")
+        return print_portfolio(
+            broker, account, output_dir, starting_capital=args.starting_capital,
+            capital_started_at=baseline,
+            progress=progress,
+        )
 
     date_from = args.date_from or input("С даты (dd.mm.yy): ").strip()
     date_to = args.date_to or input("По дату (dd.mm.yy): ").strip()
@@ -195,8 +210,12 @@ def main(argv=None):
     last_day = parse_day(date_to, tz)
     if last_day < period_from:
         raise ValueError("Конечная дата раньше начальной.")
+    if last_day.date() > datetime.now(tz).date():
+        raise ValueError("Конечная дата не может быть в будущем.")
     period_to_exclusive = last_day + timedelta(days=1)
-    print_portfolio(broker, account, output_dir)
+    capital_started_at = parse_day(args.capital_from, tz) if args.capital_from else period_from
+    if capital_started_at != period_from:
+        raise ValueError("Для выгрузки сделок стартовый капитал должен относиться к дате --from.")
 
     exporter = ExcelExporter(
         output_dir=output_dir,
@@ -205,6 +224,7 @@ def main(argv=None):
         include_summary_sheet=bool(excel_cfg.get("include_summary_sheet", True)),
     )
     if broker_name == "finam":
+        status("Загрузка исполнений и брокерских отчётов Финама")
         path, report, source_reports = execute_finam(
             broker=broker,
             exporter=exporter,
@@ -218,14 +238,29 @@ def main(argv=None):
         )
         print("\nГотово.")
         print("Результат: закрытия акций FIFO и начисленная ВМ фьючерсов, включая открытые позиции.")
+        for reason in (*report.summary.get("result_quality", ()), *report.summary.get("commission_quality", ())):
+            print(f"Качество расчёта: {reason}")
         print(f"Gross P&L: {report.summary['gross_pnl']:.2f}")
         print(f"Комиссии: {report.summary['commission']:.2f}")
         print(f"Net P&L: {report.summary['net_pnl']:.2f}")
         print(f"Excel: {path.resolve()}")
+        status("Расчёт финансовых показателей за выбранный период")
+        if "risk" not in report.summary:
+            report.summary["risk"] = analyze_result_risk(
+                report.daily, args.starting_capital, period_from, period_to_exclusive,
+            )
         print_analysis(report, path.parent)
+        print_portfolio(
+            broker, account, output_dir, starting_capital=args.starting_capital,
+            capital_started_at=capital_started_at, results=report.daily,
+            result_period_start=period_from, result_period_end=period_to_exclusive, progress=progress,
+            results_quality=(*report.summary.get("commission_quality", ()), *report.summary.get("result_quality", ())),
+        )
         if source_reports:
             print(f"Исходные отчёты ({len(source_reports)}): {source_reports[0].parent.resolve()}")
+        status("Выгрузка завершена")
         return path
+    status("Загрузка и сопоставление сделок Т-Банка")
     use_case = ExportTradeHistory(
         broker=broker,
         matcher=FifoMatcher(),
@@ -233,6 +268,7 @@ def main(argv=None):
         reconstruction_mode=str(app_cfg.get("reconstruction_mode", "full")),
         lookback_days=int(app_cfg.get("lookback_days", 30)),
         display_timezone=tz,
+        starting_capital=args.starting_capital,
     )
     path, trades = use_case.execute(account, period_from, period_to_exclusive)
 
@@ -244,9 +280,18 @@ def main(argv=None):
     print(f"Комиссии: {commission:.2f}")
     print(f"Net P&L: {(gross - commission):.2f}")
     print(f"Excel: {path.resolve()}")
+    report = analyze_trades(trades, tz, starting_capital=args.starting_capital)
+    report.summary["risk"] = analyze_result_risk(
+        report.daily, args.starting_capital, period_from, period_to_exclusive,
+    )
     if args.analytics:
-        report = analyze_trades(trades, tz, starting_capital=args.starting_capital)
         print_analysis(report, path.parent)
+    print_portfolio(
+        broker, account, output_dir, starting_capital=args.starting_capital,
+        capital_started_at=capital_started_at, results=report.daily,
+        result_period_start=period_from, result_period_end=period_to_exclusive, progress=progress,
+    )
+    status("Выгрузка завершена")
     return path
 
 

@@ -9,6 +9,7 @@ import orjson
 import polars as pl
 
 from trade_exporter.exporters.excel import write_workbook
+from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
 from trade_exporter.services.analytics import AnalysisReport
 
 
@@ -32,11 +33,12 @@ SUMMARY_LABELS = {
     "max_loss_streak": "Максимальная серия убытков",
     "trading_days": "Дней с закрытыми сделками",
     "max_drawdown": "Просадка по строкам FIFO",
-    "max_daily_drawdown": "Просадка по итогам дней",
+    "max_daily_drawdown": "Просадка накопленного результата по дням",
     "commission_load": "Комиссии / сумма |gross P&L|",
     "starting_capital": "Начальный капитал",
     "return_on_capital": "Net P&L / начальный капитал",
-    "max_drawdown_pct": "Максимальная просадка / пик капитала",
+    "max_drawdown_pct": "Просадка результата / пик условного капитала",
+    "synthetic_trade_ids": "Исполнений с локальными ID",
 }
 
 HEADERS = {
@@ -52,10 +54,18 @@ HEADERS = {
     "commission": "комиссия",
     "net_pnl": "финрез net",
     "cumulative_pnl": "накопленный net P&L",
-    "equity": "капитал",
+    "equity": "условный капитал по результатам",
     "drawdown": "просадка",
     "event_type": "тип результата",
 }
+
+
+def analysis_metadata(summary: dict) -> pl.DataFrame:
+    return pl.DataFrame([
+        (key, orjson.dumps(summary[key]).decode())
+        for key in ("commission_complete", "commission_basis", "commission_quality", "net_pnl_basis", "synthetic_trade_ids", "execution_quality", "result_complete", "result_quality", "excluded_instruments")
+        if key in summary
+    ], schema={"ключ": pl.String, "значение": pl.String}, orient="row")
 
 
 def _json_default(value):
@@ -64,7 +74,7 @@ def _json_default(value):
     raise TypeError(type(value).__name__)
 
 
-def _display_frame(frame: pl.DataFrame, *, monthly=False, result_events=False) -> pl.DataFrame:
+def _display_frame(frame: pl.DataFrame, *, monthly=False, result_events=False, partial_fees=False) -> pl.DataFrame:
     frame = frame.with_columns(
         pl.col(name).cast(pl.Float64)
         for name, dtype in frame.schema.items()
@@ -78,8 +88,14 @@ def _display_frame(frame: pl.DataFrame, *, monthly=False, result_events=False) -
             "stock_closed": "закрытие акций FIFO",
             "futures_margin": "вариационная маржа и комиссии",
             "futures_fee": "комиссии фьючерсов",
+            "broker_fee": "денежные расходы и возвраты ФИНАМ",
         }))
     headers = HEADERS | ({"trades": "строк результата", "win_rate": "доля положительных"} if result_events else {})
+    if partial_fees:
+        headers = headers | {
+            "net_pnl": "финрез после известных комиссий",
+            "cumulative_pnl": "накопленный результат после известных комиссий",
+        }
     return frame.rename({name: headers.get(name, name) for name in frame.columns})
 
 
@@ -113,8 +129,10 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
     stem = output_dir / f"{prefix}_{stamp}"
     workbook_path = stem.with_suffix(".xlsx")
     json_path = stem.with_suffix(".json")
-    labels = list(report.summary)
+    labels = [key for key, value in report.summary.items()
+              if value is None or isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)]
     result_events = "event_type" in report.trades.columns
+    partial_fees = report.summary.get("commission_complete") is False
     summary_labels = SUMMARY_LABELS | ({
         "trades": "Строк результата: FIFO акций и ВМ фьючерсов",
         "wins": "Положительных строк результата",
@@ -128,6 +146,18 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
         "trading_days": "Дней с результатом",
         "max_drawdown": "Просадка по строкам результата",
     } if result_events else {})
+    if partial_fees:
+        summary_labels = summary_labels | {
+            "net_pnl": "Результат после известных комиссий; расходы неполны",
+            "commission": "Известные комиссии; полный размер не подтверждён",
+            "avg_trade": "Средний результат после известных комиссий",
+            "return_on_capital": "Результат после известных комиссий / начальный капитал",
+        }
+    if report.summary.get("result_complete") is False:
+        summary_labels = summary_labels | {
+            "gross_pnl": "Частичный gross P&L; исключённые инструменты не учтены",
+            "net_pnl": "Частичный результат после известных комиссий" if partial_fees else "Частичный net P&L; исключённые инструменты не учтены",
+        }
     summary = pl.DataFrame({
         "показатель": [summary_labels.get(key, key) for key in labels],
         "значение": [
@@ -137,17 +167,36 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
     })
     sheets = {
         "Аналитика": summary,
-        "Результаты" if result_events else "Сделки": _display_frame(report.trades, result_events=result_events),
-        "Дни": _display_frame(report.daily, result_events=result_events),
-        "Месяцы": _display_frame(report.monthly, monthly=True, result_events=result_events),
-        "Тикеры": _display_frame(report.by_ticker, result_events=result_events),
+        "Результаты" if result_events else "Сделки": _display_frame(report.trades, result_events=result_events, partial_fees=partial_fees),
+        "Дни": _display_frame(report.daily, result_events=result_events, partial_fees=partial_fees),
+        "Месяцы": _display_frame(report.monthly, monthly=True, result_events=result_events, partial_fees=partial_fees),
+        "Тикеры": _display_frame(report.by_ticker, result_events=result_events, partial_fees=partial_fees),
     }
+    if "commission_complete" in report.summary:
+        fee_basis = report.summary.get("commission_basis", "Основа комиссий в исходном файле не указана.")
+        basis = {
+            "transactions_period": "Денежные расходы и возвраты из Transactions за выбранный период; по отдельным сделкам не распределены.",
+            "execution_fifo_and_futures": "Комиссии исполнений: распределение FIFO для акций и комиссии фьючерсов выбранного периода.",
+        }.get(fee_basis, str(fee_basis))
+        sheets["Основа расчёта"] = pl.DataFrame([
+            ("Комиссии", basis),
+            ("Полнота расходов", "Не подтверждена; результат после известных комиссий является частичным." if partial_fees else "Подтверждена в рамках выбранной основы расчёта."),
+            *(("Качество данных", reason) for reason in report.summary.get("commission_quality", [])),
+            *(("Идентификаторы исполнений", reason) for reason in report.summary.get("execution_quality", [])),
+            *(("Полнота результата", reason) for reason in report.summary.get("result_quality", [])),
+        ], schema={"раздел": pl.String, "основа расчёта": pl.String}, orient="row")
+    metadata = analysis_metadata(report.summary)
+    if not metadata.is_empty():
+        sheets["Параметры расчёта"] = metadata
+    risk = report.summary.get("risk")
+    if risk is not None:
+        sheets["Риск и доходность"] = risk_sheet(risk)
     options = {}
     formats = {
         "*финрез*": {"num_format": "#,##0.00"},
         "комиссия": {"num_format": "#,##0.00"},
         "накопленный net P&L": {"num_format": "#,##0.00"},
-        "капитал": {"num_format": "#,##0.00"},
+        "условный капитал по результатам": {"num_format": "#,##0.00"},
         "просадка": {"num_format": "#,##0.00"},
         "цена*": {"num_format": "0.######"},
         "win rate": {"num_format": "0.00%"},
@@ -170,18 +219,20 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
             if report.summary.get(key) is not None
         },
     }
+    if risk is not None:
+        options["Риск и доходность"] = risk_sheet_options(risk)
     if not report.daily.is_empty():
         options["Дни"]["charts"] = {
-            "K2": _chart(report.daily, "Дни", "cumulative_pnl", "Накопленный net P&L"),
-            "K22": _chart(report.daily, "Дни", "drawdown", "Просадка по итогам дней"),
+            "K2": _chart(report.daily, "Дни", "cumulative_pnl", "Результат после известных комиссий" if partial_fees else "Накопленный net P&L"),
+            "K22": _chart(report.daily, "Дни", "drawdown", "Просадка накопленного результата по дням"),
         }
     if not report.monthly.is_empty():
         options["Месяцы"]["charts"] = {
-            "H2": _chart(report.monthly, "Месяцы", "net_pnl", "Net P&L по месяцам", "column"),
+            "H2": _chart(report.monthly, "Месяцы", "net_pnl", "После известных комиссий по месяцам" if partial_fees else "Net P&L по месяцам", "column"),
         }
     if not report.by_ticker.is_empty():
         options["Тикеры"]["charts"] = {
-            "K2": _chart(report.by_ticker, "Тикеры", "net_pnl", "Net P&L по тикерам", "bar"),
+            "K2": _chart(report.by_ticker, "Тикеры", "net_pnl", "После известных комиссий по тикерам" if partial_fees else "Net P&L по тикерам", "bar"),
         }
     write_workbook(workbook_path, sheets, sheet_options=options)
     payload = {

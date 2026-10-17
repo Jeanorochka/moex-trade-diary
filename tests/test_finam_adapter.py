@@ -274,6 +274,60 @@ def test_duplicate_id_is_removed_but_distinct_identical_fills_remain(http, monke
     assert len(broker.get_fills("acc", START, END)) == 2
 
 
+def test_numeric_and_string_trade_ids_normalize_without_losing_distinct_executions(http, monkeypatch):
+    broker, _ = history_broker(monkeypatch, [
+        make_trade(9007199254740993), make_trade("9007199254740993"),
+        make_trade(9007199254740994), make_trade("009007199254740993"),
+    ])
+    trades = broker.load_trades("acc", START, END)
+    assert [trade["trade_id"] for trade in trades] == [
+        "9007199254740993", "9007199254740994", "009007199254740993",
+    ]
+
+
+def test_trade_id_outer_whitespace_is_normalized_before_deduplication(http, monkeypatch):
+    broker, _ = history_broker(monkeypatch, [make_trade(" 123 "), make_trade("123")])
+    assert [trade["trade_id"] for trade in broker.load_trades("acc", START, END)] == ["123"]
+
+
+def test_anonymous_trade_occurrences_preserve_identical_executions_and_report_quality(http, monkeypatch):
+    rows = [make_trade(""), make_trade(None), make_trade("  "), make_trade("real"), make_trade("real")]
+    broker, _ = history_broker(monkeypatch, rows)
+    first = broker.load_trades("acc", START, END)
+    second = broker.load_trades("acc", START, END)
+    assert [trade["trade_id"] for trade in first] == ["synthetic:1", "synthetic:2", "synthetic:3", "real"]
+    assert [trade["trade_id"] for trade in second] == [trade["trade_id"] for trade in first]
+    assert all(trade["trade_id_source"] == "response_occurrence" for trade in first[:3])
+    assert broker.history_quality["acc"]["synthetic_trade_ids"] == 3
+    assert len(broker.get_fills("acc", START, END)) == 4
+
+
+def test_missing_trade_id_uses_occurrence_without_undocumented_id_alias(http, monkeypatch):
+    row = make_trade()
+    del row["trade_id"]
+    row["id"] = "unknown-field"
+    broker, _ = history_broker(monkeypatch, [row, deepcopy(row)])
+    trades = broker.load_trades("acc", START, END)
+    assert [trade["trade_id"] for trade in trades] == ["synthetic:1", "synthetic:2"]
+    assert all(trade["id"] == "unknown-field" for trade in trades)
+
+
+def test_anonymous_trades_survive_saturated_nonoverlapping_windows(http, monkeypatch):
+    rows = [make_trade("", timestamp=f"2026-01-01T{hour:02d}:00:00Z") for hour in (1, 8, 12, 18)]
+    broker, _ = history_broker(monkeypatch, rows, settings={"history_limit": 2})
+    trades = broker.load_trades("acc", START, END)
+    assert len(trades) == 4
+    assert [broker._timestamp(trade["timestamp"]).hour for trade in trades] == [1, 8, 12, 18]
+    assert len({trade["trade_id"] for trade in trades}) == 4
+
+
+@pytest.mark.parametrize("identity", [True, False, 1.5, 1.0, [], {}])
+def test_lossy_or_invalid_trade_identifier_types_are_rejected(http, monkeypatch, identity):
+    broker, _ = history_broker(monkeypatch, [make_trade(identity)])
+    with pytest.raises(RuntimeError, match="trade_id должен быть строкой или целым числом"):
+        broker.load_trades("acc", START, END)
+
+
 def test_conflicting_duplicate_trade_fails(http, monkeypatch):
     broker, _ = history_broker(monkeypatch, [make_trade(), make_trade(price={"value": "251"})])
     with pytest.raises(RuntimeError, match="противоречивые данные"):
@@ -296,7 +350,6 @@ def test_invalid_or_fractional_quantity_is_not_truncated_or_skipped(http, monkey
         {"commission": None},
         {"commission": {"value": {"value": "1"}, "currency": "USD"}},
         {"currency": ""},
-        {"trade_id": ""},
         {"account_id": "other"},
     ],
 )

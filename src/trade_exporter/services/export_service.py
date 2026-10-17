@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from trade_exporter.brokers.base import BrokerAdapter
 from trade_exporter.domain.models import Account
 from trade_exporter.exporters.excel import ExcelExporter
 from trade_exporter.services.matcher import FifoMatcher
+from trade_exporter.services.analytics import analyze_trades
+from trade_exporter.services.risk import analyze_result_risk
 
 
 class ExportTradeHistory:
@@ -19,6 +22,7 @@ class ExportTradeHistory:
         reconstruction_mode: str,
         lookback_days: int,
         display_timezone,
+        starting_capital: Decimal = Decimal(0),
     ):
         self.broker = broker
         self.matcher = matcher
@@ -26,6 +30,7 @@ class ExportTradeHistory:
         self.reconstruction_mode = reconstruction_mode
         self.lookback_days = lookback_days
         self.display_timezone = display_timezone
+        self.starting_capital = starting_capital
 
     def execute(
         self,
@@ -46,6 +51,10 @@ class ExportTradeHistory:
             if period_from <= trade.exit_at.astimezone(period_from.tzinfo) < period_to_exclusive
         ]
 
+        options = {}
+        if self.starting_capital > 0:
+            report = analyze_trades(selected, self.display_timezone, self.starting_capital)
+            options["risk"] = analyze_result_risk(report.daily, self.starting_capital, period_from, period_to_exclusive)
         path = self.exporter.export(
             trades=selected,
             broker_name=self.broker.name,
@@ -53,6 +62,7 @@ class ExportTradeHistory:
             period_from=period_from,
             period_to_inclusive=period_to_exclusive - timedelta(microseconds=1),
             display_timezone=self.display_timezone,
+            **options,
         )
         return path, selected
 

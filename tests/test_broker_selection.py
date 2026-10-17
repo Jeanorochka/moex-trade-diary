@@ -100,7 +100,7 @@ def test_root_dotenv_routes_each_token_only_to_its_adapter(selected, both, tmp_p
     monkeypatch.setattr(cli, "create_broker", create)
     monkeypatch.setattr(FinamBroker, "list_accounts", lambda *a: [account])
     monkeypatch.setattr(TBankBroker, "list_accounts", lambda *a: [account])
-    monkeypatch.setattr(cli, "print_portfolio", lambda *a: ())
+    monkeypatch.setattr(cli, "print_portfolio", lambda *a, **kwargs: ())
     monkeypatch.setattr("builtins.input", lambda *a: "1" if selected == "finam" else "2")
     assert cli.main(["--config", str(config_copy), "--portfolio", "--account-id", "1"]) == ()
     assert created == [(selected, "finam-secret" if selected == "finam" else "tbank-secret")]
