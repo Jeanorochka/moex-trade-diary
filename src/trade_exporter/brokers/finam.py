@@ -145,7 +145,7 @@ class FinamBroker(BrokerAdapter):
             if not token_details:
                 options["headers"] = {"Authorization": f"Bearer {self._jwt}"}
             if params is not None:
-                options["params"] = params
+                options["params"] = {str(key): str(value) for key, value in params.items()}
             if json is not None:
                 options["json"] = json
             if token_details:
