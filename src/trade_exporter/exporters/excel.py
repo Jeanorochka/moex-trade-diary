@@ -70,6 +70,7 @@ class ExcelExporter:
         display_timezone,
         *,
         risk: dict | None = None,
+        portfolio_period: dict | None = None,
     ) -> Path:
         path = self._new_file_path(
             broker_name,
@@ -116,8 +117,9 @@ class ExcelExporter:
             }
         }
         if self.include_summary_sheet:
-            sheets["Итоги"] = self._summary_frame(trades)
-            options["Итоги"] = {
+            summary_name = "Итоги сделок" if portfolio_period is not None else "Итоги"
+            sheets[summary_name] = self._summary_frame(trades)
+            options[summary_name] = {
                 "header": False,
                 "autofit": False,
                 "freeze_panes": False,
@@ -125,23 +127,34 @@ class ExcelExporter:
                 "column_widths": {0: 24, 1: 18},
                 "cells": {
                     "B4": {
-                        "value": sheets["Итоги"]["value"][3],
+                        "value": sheets[summary_name]["value"][3],
                         "num_format": "0.00%",
                     },
                     **{
                         f"B{row}": {
-                            "value": sheets["Итоги"]["value"][row - 1],
+                            "value": sheets[summary_name]["value"][row - 1],
                             "num_format": "0.00",
                         }
                         for row in (5, 6, 7)
                     },
                 },
             }
+        if portfolio_period is not None:
+            from trade_exporter.exporters.portfolio import portfolio_period_sheet, portfolio_period_sheet_options
+
+            sheets = {"Портфель за период": portfolio_period_sheet(portfolio_period), **sheets}
+            options["Портфель за период"] = portfolio_period_sheet_options(portfolio_period)
         if risk is not None:
             from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
 
             sheets["Риск и доходность"] = risk_sheet(risk)
             options["Риск и доходность"] = risk_sheet_options(risk)
+        if portfolio_period is not None or risk is not None:
+            from trade_exporter.exporters.analytics import analysis_metadata
+
+            metadata = ({"portfolio_period": portfolio_period} if portfolio_period is not None else {}) | ({"risk": risk} if risk is not None else {})
+            sheets["Параметры расчёта"] = analysis_metadata(metadata)
+            options["Параметры расчёта"] = {"column_widths": {0: 40, 1: 80}}
         return write_workbook(path, sheets, sheet_options=options)
 
     def _new_file_path(

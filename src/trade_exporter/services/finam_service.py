@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,11 +12,12 @@ from trade_exporter.brokers.finam_reports import FinamReports
 from trade_exporter.brokers.portfolio import load_cash_flows
 from trade_exporter.exporters.analytics import analysis_metadata
 from trade_exporter.exporters.excel import write_workbook
-from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
+from trade_exporter.exporters.portfolio import portfolio_period_sheet, portfolio_period_sheet_options, risk_sheet, risk_sheet_options
 from trade_exporter.services.analytics import AnalysisReport, analyze_results
 from trade_exporter.services.finam_report import parse_finam_margins
 from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.risk import analyze_result_risk
+from trade_exporter.services.performance import attach_portfolio_performance
 
 
 ZERO = Decimal("0")
@@ -206,6 +207,7 @@ def execute_finam(
     starting_capital: Decimal = ZERO,
     reconstruction_mode: str = "full",
     lookback_days: int = 30,
+    portfolio_report=None,
 ) -> tuple[Path, AnalysisReport, list[Path]]:
     if isinstance(display_timezone, str):
         display_timezone = ZoneInfo(display_timezone)
@@ -323,9 +325,10 @@ def execute_finam(
         local_end = period_to_exclusive.astimezone(display_timezone)
         if local_start.time() != time() or local_end.time() != time():
             raise ValueError("Finam: результат фьючерсов по отчётам доступен за полные календарные дни")
-        baseline = datetime.combine(local_start.date() - timedelta(days=1), time(), display_timezone)
+        baseline = datetime.combine(local_start.date() - timedelta(days=1), time(), timezone.utc)
+        report_end = datetime.combine(local_end.date(), time(), timezone.utc)
         downloader = FinamReports(broker, exporter.output_dir)
-        report_paths = downloader.download(account.id, baseline, period_to_exclusive, chunk_days=1)
+        report_paths = downloader.download(account.id, baseline, report_end, chunk_days=1)
         margins = parse_finam_margins(report_paths, report_dates=downloader.report_dates)
         future_assets = {symbol: asset for symbol, asset in assets.items() if _future(asset)}
         margin_rows = _margin_rows(
@@ -384,10 +387,16 @@ def execute_finam(
         for metric in risk["metrics"]:
             metric["quality_reason"] = " ".join(filter(None, (metric.get("quality_reason"), reason)))
     report.summary["risk"] = risk
+    attach_portfolio_performance(report, portfolio_report)
+    risk = report.summary["risk"]
+    portfolio_period = report.summary.get("portfolio_period")
     if not has_futures and not transaction_fees and not execution_quality and not result_quality:
+        options = {"risk": risk}
+        if portfolio_period is not None:
+            options["portfolio_period"] = portfolio_period
         path = exporter.export(
             closed, broker.name, account.id, period_from,
-            period_to_exclusive - timedelta(microseconds=1), display_timezone, risk=risk,
+            period_to_exclusive - timedelta(microseconds=1), display_timezone, **options,
         )
         return path, report, report_paths
 
@@ -401,7 +410,7 @@ def execute_finam(
     basis_rows = [
         ("Акции", "Валовой реализованный FIFO P&L закрытых сделок." if transaction_fees else "Реализованный FIFO P&L закрытых сделок после комиссий."),
         ("Фьючерсы", "Вариационная маржа, включая открытые позиции: оплаченная плюс изменение неоплаченной; комиссии учтены отдельно."),
-        ("Итог портфеля", "Рублёвый результат акций и фьючерсов. Вводы, выводы, дивиденды, проценты и налоги в этот итог не входят."),
+        ("Торговый результат", "Закрытия по исторической себестоимости и ВМ фьючерсов. Переоценка открытых акций, выплаты по бумагам и изменение себестоимости к началу периода здесь не моделируются. Это не общая прибыль портфеля."),
     ]
     if transaction_fees:
         basis_rows.extend([
@@ -427,7 +436,7 @@ def execute_finam(
         "Сделки": _closed_rows(closed, display_timezone, allocated_fees=not transaction_fees),
         "Исполнения ФИНАМ": pl.DataFrame(execution_rows, schema=EXECUTION_SCHEMA),
         "Фьючерсы": _display(margin_frame),
-        "Итог портфеля": _display(report.daily),
+        "Торговый результат": _display(report.daily),
         "Результаты": result_frame,
         "Основа расчёта": explanation,
         "Параметры расчёта": analysis_metadata(report.summary),
@@ -438,5 +447,9 @@ def execute_finam(
             "валюта": pl.String, "идентификатор операции": pl.String,
         })
     sheets["Риск и доходность"] = risk_sheet(risk)
-    write_workbook(path, sheets, sheet_options={"Риск и доходность": risk_sheet_options(risk)})
+    sheet_options = {"Риск и доходность": risk_sheet_options(risk)}
+    if portfolio_period is not None:
+        sheets = {"Портфель за период": portfolio_period_sheet(portfolio_period), **sheets}
+        sheet_options["Портфель за период"] = portfolio_period_sheet_options(portfolio_period)
+    write_workbook(path, sheets, sheet_options=sheet_options)
     return path, report, report_paths

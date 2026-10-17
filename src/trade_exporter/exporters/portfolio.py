@@ -147,9 +147,122 @@ def _summary_value(key, value):
     return VALUES.get(str(value), str(value))
 
 
+PERIOD_METRICS = (
+    ("starting_equity", "Капитал в начале", "money", "Начальная стоимость на выбранную дату."),
+    ("ending_equity", "Капитал в конце", "money", "Сводная оценка портфеля на конечную дату."),
+    ("external_inflows", "Внешние пополнения за период", "money", "Пополнения извне; торговые поступления и доходы не считаются вводами."),
+    ("external_outflows", "Внешние выводы за период", "money", "Выводы со счёта; покупки, погашения и внутренние операции не считаются выводами."),
+    ("net_external_flows", "Чистые внешние движения", "money", "Внешние пополнения минус внешние выводы."),
+    ("total_profit", "Полный результат портфеля", "money", "Капитал в конце − капитал в начале − чистые внешние движения. Включает переоценку открытых позиций и отражённые в капитале доходы и расходы."),
+    ("period_return", "Доходность портфеля за период", "fraction", "Modified Dietz: полный результат / капитал с весами внешних потоков по времени."),
+    ("annualized_return", "Годовой пересчёт доходности портфеля", "fraction", "Геометрический пересчёт темпа за фактическую длительность периода; не прогноз."),
+    ("xirr", "Годовая денежно-взвешенная доходность (XIRR)", "fraction", "Ставка по начальной стоимости, внешним потокам и конечной оценке; год 365 дней."),
+    ("days", "Длительность периода", "days", "Фактическое время между начальной и конечной оценкой."),
+)
+
+
+def portfolio_period_sheet(period: dict) -> pl.DataFrame:
+    complete = period.get("status") == "complete"
+    quality = " ".join(str(value) for value in period.get("quality", []))
+    if not complete:
+        quality = " ".join(filter(None, ("Полный результат недоступен: не подтверждены оценки или внешние движения периода.", quality)))
+    currency = str(period.get("base_currency") or "")
+    dates = str(period.get("started_at") or "н/д") + " — " + str(period.get("ended_at") or "н/д")
+    rows = []
+    for key, label, unit, method in PERIOD_METRICS:
+        value = period.get(key)
+        if key in {"total_profit", "period_return", "annualized_return", "xirr"} and not complete:
+            value = None
+        if key == "ending_equity":
+            method = {
+                "current_broker_nav": "Текущая сводная оценка счёта у брокера; открытые позиции уже входят в капитал.",
+                "historical_broker_report": "Сводная стоимость счёта из исторического брокерского отчёта.",
+            }.get(period.get("valuation_basis"), method)
+        rows.append({
+            "показатель": label, "значение": float(value) if value is not None else None,
+            "единица": "%" if unit == "fraction" else "дней" if unit == "days" else currency,
+            "дата / период": str(period.get("started_at") or "н/д") if key == "starting_equity" else str(period.get("ended_at") or "н/д") if key == "ending_equity" else dates,
+            "основание": method, "качество данных": quality,
+        })
+    rows.append({
+        "показатель": "Источник оценки и движений", "значение": None, "единица": "",
+        "дата / период": dates, "основание": str(period.get("source") or "Источник не указан."),
+        "качество данных": quality,
+    })
+    if period.get("requested_end"):
+        rows.append({
+            "показатель": "Запрошенное окончание периода (не включается)", "значение": None,
+            "единица": "", "дата / период": str(period["requested_end"]),
+            "основание": "Конечная стоимость относится к фактической дате оценки, указанной выше.",
+            "качество данных": quality,
+        })
+    return pl.DataFrame(rows, schema={
+        "показатель": pl.String, "значение": pl.Float64, "единица": pl.String,
+        "дата / период": pl.String, "основание": pl.String, "качество данных": pl.String,
+    })
+
+
+def portfolio_period_sheet_options(period: dict) -> dict:
+    return {
+        "column_widths": {0: 55, 1: 24, 2: 12, 3: 61, 4: 82, 5: 75},
+        "column_formats": {
+            "значение": {"num_format": "#,##0.00"},
+            "основание": {"wrap_text": True}, "качество данных": {"wrap_text": True},
+        },
+        "cells": {
+            f"B{index + 2}": {"value": float(period[key]), "num_format": "0.00%"}
+            for index, (key, label, unit, method) in enumerate(PERIOD_METRICS)
+            if unit == "fraction" and period.get("status") == "complete" and period.get(key) is not None
+        },
+    }
+
+
+def _risk_metrics(risk):
+    priorities = {
+        name: index for index, name in enumerate((
+            "starting_capital", "current_equity", "capital_period_profit", "capital_period_return",
+            "capital_period_annualized", "capital_period_xirr", "annualized_money_weighted_return",
+        ))
+    }
+    return sorted(risk.get("metrics", []), key=lambda item: (
+        0 if item.get("metric") in priorities else 2 if item.get("basis") == "closed_pnl_proxy" or str(item.get("metric", "")).startswith("proxy_") else 1,
+        priorities.get(item.get("metric"), 0),
+    ))
+
+
+def _portfolio_period_html(period):
+    if not period:
+        return ""
+    complete = period.get("status") == "complete"
+    currency = period.get("base_currency")
+    quality = " ".join(str(value) for value in period.get("quality", []))
+    if not complete:
+        quality = " ".join(filter(None, ("Полный результат недоступен: не подтверждены оценки или внешние движения периода.", quality)))
+    cards = []
+    for key, label, percentage in (
+        ("total_profit", "Полный результат портфеля", False),
+        ("period_return", "Доходность портфеля за период", True),
+        ("annualized_return", "Годовой пересчёт доходности", True),
+        ("starting_equity", "Капитал в начале", False),
+        ("ending_equity", "Капитал в конце", False),
+        ("net_external_flows", "Чистые внешние движения", False),
+    ):
+        value = period.get(key) if complete or key in {"starting_equity", "ending_equity", "net_external_flows"} else None
+        caption = "Геометрический пересчёт темпа; не прогноз." if key == "annualized_return" else "С учётом дат внешних движений (Modified Dietz)." if key == "period_return" else "Переоценка открытых позиций, доходы и расходы включены." if key == "total_profit" else ""
+        cards.append('<div class="stat"><span class="label">' + label + '</span><strong class="'
+                     + (_tone(value) if key in {"total_profit", "period_return", "annualized_return"} else '')
+                     + '">' + escape(_fmt(value, None if percentage else currency, percent=percentage))
+                     + '</strong><span class="caption">' + caption + '</span></div>')
+    return ('<section class="panel" id="portfolio-period" style="margin-top:20px"><h2>Портфель за период</h2><p class="sub">'
+        + escape(str(period.get("started_at") or "н/д")) + ' — ' + escape(str(period.get("ended_at") or "н/д"))
+        + '</p><div class="stats">' + ''.join(cards) + '</div><p class="caption">'
+        + escape(str(period.get("source") or "Источник не указан.")) + '</p>'
+        + ('<p class="caption">' + escape(quality) + '</p>' if quality else '') + '</section>')
+
+
 def risk_sheet(risk: dict) -> pl.DataFrame:
     rows = []
-    for item in risk.get("metrics", []):
+    for item in _risk_metrics(risk):
         value = item.get("value")
         rows.append({
             "показатель": str(item.get("label") or item["metric"]),
@@ -180,7 +293,7 @@ def risk_sheet_options(risk: dict) -> dict:
         },
         "cells": {
             f"B{index + 2}": {"value": float(item["value"]), "num_format": "0.00%"}
-            for index, item in enumerate(risk.get("metrics", []))
+            for index, item in enumerate(_risk_metrics(risk))
             if item.get("unit") == "fraction" and item.get("value") is not None
         },
     }
@@ -222,7 +335,7 @@ def _risk_html(risk):
         + (' · ' if row["качество данных"] else '') + str(row["наблюдений"] if row["наблюдений"] is not None else "н/д")
         + ' наблюдений</span></td><td style="text-align:left;white-space:normal;min-width:220px">'
         + escape(row["основание"]) + '</td></tr>'
-        for row, item in zip(frame.to_dicts(), risk["metrics"])
+        for row, item in zip(frame.to_dicts(), _risk_metrics(risk))
     )
     quality = ' · '.join(str(value) for value in risk.get("quality", []))
     return '<section class="panel" style="margin-top:20px"><h2>Риск и доходность</h2><p class="sub">Значения, методы расчета и доступность исходных данных</p>' + (
@@ -411,13 +524,14 @@ def _html(report, workbook_name, json_name, comparison):
     if not rows:
         rows.append('<tr><td colspan="8" style="text-align:center;padding:38px;color:#697b8f">Открытых позиций нет</td></tr>')
     complete_ledger = summary.get("ledger_complete") is True
-    profit = summary.get("lifetime_profit") if complete_ledger and summary.get("returns_complete", True) else None
+    funding_confirmed = complete_ledger and summary.get("external_flows_currency_complete", summary.get("flows_currency_complete", True)) and summary.get("funding_status") != "missing_inception_funding"
+    profit = summary.get("lifetime_profit") if funding_confirmed and summary.get("returns_complete", True) else None
     ratios = '<dl class="meta" style="border-top:1px solid var(--line);padding-top:16px">' + ''.join(
         f'<dt>{label}</dt><dd>{escape(_fmt(summary.get(key) if profit is not None else None, percent=True))}</dd>'
         for key, label in (("xirr", "Среднегодовая доходность (XIRR)"), ("profit_to_net_funding_ratio", "Прибыль / чистые взносы"))
     ) + '</dl>'
     funding = "".join(
-        f'<div><span class="label">{label}</span><strong>{money(key)}</strong></div>'
+        f'<div><span class="label">{label}</span><strong>{escape(_fmt(summary.get(key) if funding_confirmed else None, currency))}</strong></div>'
         for key, label in (("total_external_inflows", "Внесено"), ("total_external_outflows", "Выведено"), ("net_external_funding", "Чистые внесения"))
     )
     cash = "".join(
@@ -430,7 +544,7 @@ def _html(report, workbook_name, json_name, comparison):
         ("Брокер / счет", f"{summary.get('broker', '')} / {summary.get('account_id', '')}"),
         ("Источник", summary.get("source") or "н/д"),
         ("Денежная оценка", f"{summary.get('priced_positions_count', 0)} из {summary.get('positions_count', len(positions))} позиций"),
-        ("История движения средств", "Полная" if complete_ledger else "Неполная"),
+        ("История движения средств с открытия", "Полная" if complete_ledger else "Неполная"),
         ("Начало истории", summary.get("ledger_start") or "н/д"),
     ]
     if summary.get("valuation_residual") is not None:
@@ -444,7 +558,11 @@ def _html(report, workbook_name, json_name, comparison):
     if summary.get("funding_status"):
         metadata.append(("Исходные внесения", VALUES.get(summary["funding_status"], summary["funding_status"])))
     meta = "".join(f"<dt>{escape(str(key))}</dt><dd>{escape(str(value))}</dd>" for key, value in metadata)
-    quality = list(dict.fromkeys(str(value) for key in ("cash_flow_quality", "period_quality") for value in summary.get(key, [])))
+    quality = list(dict.fromkeys(
+        label + ": " + str(value)
+        for key, label in (("cash_flow_quality", "История с открытия счёта"), ("period_cash_flow_quality", "Движения выбранного периода"), ("period_quality", "Наблюдения между сохранёнными снимками"))
+        for value in summary.get(key, [])
+    ))
     quality_html = '<div style="border-top:1px solid var(--line);margin-top:17px;padding-top:12px">' + ''.join(
         f'<p class="caption" style="margin:5px 0">{escape(value)}</p>' for value in quality
     ) + '</div>' if quality else ''
@@ -456,10 +574,10 @@ def _html(report, workbook_name, json_name, comparison):
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Портфель · {escape(str(summary.get("account_id") or ""))}</title><style>{CSS}</style></head>
 <body><main><div class="top"><div class="brand"><span class="brand-mark">↗</span> МОЙ ПОРТФЕЛЬ</div><div class="downloads"><a href="{escape(workbook_name, quote=True)}">Скачать Excel</a><a href="{escape(json_name, quote=True)}">Данные JSON</a></div></div>
 <section class="hero"><div><div class="eyebrow">Состояние на {escape(captured)}</div><h1>Капитал сейчас</h1><div class="equity">{money("equity")}</div><div class="hero-meta">Сводная оценка брокера · {escape(currency)}</div></div><div class="hero-side"><div class="hero-tag">Снимок портфеля</div><strong>{escape(str(summary.get("broker") or ""))}</strong><span>Счет {escape(str(summary.get("account_id") or ""))}</span></div></section>
-<div class="stats"><div class="stat"><span class="label">Деньги на счете</span><strong>{money("cash_base")}</strong><span class="caption">В валюте отчета</span></div><div class="stat"><span class="label">Стоимость позиций</span><strong>{money("positions_market_value")}</strong><span class="caption">{summary.get("priced_positions_count", 0)} позиций с денежной оценкой</span></div><div class="stat"><span class="label">Нереализованный результат</span><strong class="{_tone(unrealized)}">{escape(_fmt(unrealized, currency))}</strong><span class="caption">{escape(unrealized_caption)}</span></div></div>
+{_portfolio_period_html(summary.get("portfolio_period"))}<div class="stats"><div class="stat"><span class="label">Деньги на счете</span><strong>{money("cash_base")}</strong><span class="caption">В валюте отчета</span></div><div class="stat"><span class="label">Стоимость позиций</span><strong>{money("positions_market_value")}</strong><span class="caption">{summary.get("priced_positions_count", 0)} позиций с денежной оценкой</span></div><div class="stat"><span class="label">Нереализованный результат</span><strong class="{_tone(unrealized)}">{escape(_fmt(unrealized, currency))}</strong><span class="caption">{escape(unrealized_caption)}</span></div></div>
 <div class="grid"><section class="panel"><h2>Структура вложений</h2><p class="sub">{escape(allocation_caption)} · денежная оценка в {escape(currency)}</p>{_allocation_svg(report.allocation, currency)}<div class="legend"><span><i class="dot green"></i>Длинные позиции</span><span><i class="dot red"></i>Короткие позиции</span></div></section><section class="panel"><h2>Покупка и стоимость сейчас</h2><p class="sub">{escape(cost_caption)}</p>{_comparison_svg(comparison, currency)}<div class="legend"><span><i class="dot gray"></i>Себестоимость</span><span><i class="dot green"></i>Текущая стоимость</span></div></section></div>{_history_panel(summary, _history(summary))}
 {_risk_html(summary.get("risk"))}<section class="panel table-panel"><div class="table-top"><div><h2>Открытые позиции</h2><p class="sub">Цена покупки, текущая оценка и результат по каждому инструменту</p></div><input class="search" type="search" id="position-search" aria-label="Найти инструмент" placeholder="Найти инструмент…"></div><div class="table-wrap"><table id="holdings"><thead><tr><th>Инструмент</th><th>Количество</th><th>Средняя покупка</th><th>Цена сейчас</th><th>Себестоимость</th><th>Стоимость сейчас</th><th>Нереализованный результат</th><th>Доля капитала</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div><div class="table-foot">Нереализованный результат отражен отдельно. Капитал включает оценку брокера на дату снимка.</div></section>
-<div class="grid bottom"><section class="panel"><h2>Движение капитала</h2><p class="sub">Пополнения и выводы за доступную историю счета</p><div class="funding">{funding}</div><div class="profit"><div><span class="label">Результат за всю историю</span><div class="caption">По капиталу и полной истории внешних движений</div></div><strong class="{_tone(profit)}">{escape(_fmt(profit, currency))}</strong></div>{ratios}<div class="cash-list">{cash}</div></section><section class="panel"><h2>Источники и оценка</h2><p class="sub">Основание цифр в этом снимке</p><dl class="meta">{meta}</dl>{quality_html}</section></div><div class="footer"><span>Снимок на {escape(captured)}. Цены и остатки относятся к указанной дате.</span><span>Портфель · {escape(currency)}</span></div></main>
+<div class="grid bottom"><section class="panel"><h2>Движение капитала за всю историю</h2><p class="sub">{"Пополнения и выводы с открытия счёта" if funding_confirmed else "Полная история внешних движений с открытия не подтверждена; суммы недоступны"}</p><div class="funding">{funding}</div><div class="profit"><div><span class="label">Результат за всю историю</span><div class="caption">По капиталу и полной истории внешних движений</div></div><strong class="{_tone(profit)}">{escape(_fmt(profit, currency))}</strong></div>{ratios}<div class="cash-list">{cash}</div></section><section class="panel"><h2>Источники и оценка</h2><p class="sub">Основание цифр в этом снимке</p><dl class="meta">{meta}</dl>{quality_html}</section></div><div class="footer"><span>Снимок на {escape(captured)}. Цены и остатки относятся к указанной дате.</span><span>Портфель · {escape(currency)}</span></div></main>
 <script>const search=document.getElementById('position-search');search.addEventListener('input',()=>{{const value=search.value.toLocaleLowerCase('ru');document.querySelectorAll('#holdings tbody tr').forEach(row=>{{row.hidden=!row.textContent.toLocaleLowerCase('ru').includes(value)}})}});</script></body></html>'''
 
 
@@ -471,6 +589,10 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
     workbook_path, json_path, html_path = (stem.with_suffix(extension) for extension in (".xlsx", ".json", ".html"))
     comparison = _comparison(report.positions, report.summary.get("base_currency"))
     simple_summary = {key: value for key, value in report.summary.items() if not isinstance(value, (list, dict))}
+    if report.summary.get("ledger_complete") is not True or report.summary.get("funding_status") == "missing_inception_funding" or report.summary.get("external_flows_currency_complete") is False:
+        for key in ("total_external_inflows", "total_external_outflows", "net_external_funding"):
+            if key in simple_summary:
+                simple_summary[key] = None
     summary_frame = pl.DataFrame({
         "показатель": [SUMMARY.get(key, key) for key in simple_summary],
         "значение": [
@@ -486,6 +608,12 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
         "Движения": _display(report.flows),
         "Покупка и сейчас": comparison,
     }
+    period_flows = getattr(report, "period_flows", None)
+    if period_flows is not None:
+        sheets["Потоки периода"] = _display(period_flows)
+    portfolio_period = report.summary.get("portfolio_period")
+    if portfolio_period is not None:
+        sheets = {"Портфель за период": portfolio_period_sheet(portfolio_period), **sheets}
     history = _history(report.summary)
     if not history.is_empty():
         sheets["История стоимости"] = history
@@ -508,7 +636,7 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
         })
     quality_rows = [
         (label, str(value))
-        for key, label in (("cash_flow_quality", "История денежных движений"), ("period_quality", "Период наблюдений"))
+        for key, label in (("cash_flow_quality", "История с открытия счёта"), ("period_cash_flow_quality", "Движения выбранного периода"), ("period_quality", "Наблюдения между сохранёнными снимками"))
         for value in report.summary.get(key, [])
     ]
     if quality_rows:
@@ -528,6 +656,8 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
                 formats[column] = {"num_format": "#,##0.00"}
         options[sheet_name] = {"column_formats": formats, "column_widths": {"_all": 42}}
     options["Портфель"].update({"column_widths": {0: 52, 1: 42}})
+    if portfolio_period is not None:
+        options["Портфель за период"] = portfolio_period_sheet_options(portfolio_period)
     if risk is not None:
         options["Риск и доходность"] = risk_sheet_options(risk)
     if history.height >= 2:
@@ -567,6 +697,7 @@ def export_portfolio(report: PortfolioReport, output_dir: str | Path, prefix="po
         "kind": "portfolio_snapshot", "version": 1, "summary": report.summary,
         "positions": report.positions.to_dicts(), "allocation": report.allocation.to_dicts(),
         "cash": report.cash.to_dicts(), "flows": report.flows.to_dicts(),
+        "period_flows": period_flows.to_dicts() if period_flows is not None else None,
     }
     json_path.write_bytes(orjson.dumps(payload, default=_json_default, option=orjson.OPT_INDENT_2))
     html_path.write_text(_html(report, workbook_path.name, json_path.name, comparison), encoding="utf-8")

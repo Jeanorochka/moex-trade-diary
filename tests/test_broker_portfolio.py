@@ -444,12 +444,10 @@ def test_finam_inclusive_upper_endpoint_is_filtered_without_losing_inside_operat
     assert [flow.id for flow in history.flows] == ["a"]
 
 
-@pytest.mark.parametrize("change", ["conflict", "missing_id", "bad_sign", "nonfinite"])
+@pytest.mark.parametrize("change", ["missing_id", "bad_sign", "nonfinite"])
 def test_finam_invalid_transaction_data_fails(change):
     rows = [transaction("a")]
-    if change == "conflict":
-        rows.append(transaction("a", amount="101"))
-    elif change == "missing_id":
+    if change == "missing_id":
         del rows[0]["id"]
     elif change == "bad_sign":
         rows[0]["transaction_category"] = "WITHDRAW"
@@ -457,6 +455,120 @@ def test_finam_invalid_transaction_data_fails(change):
         rows[0]["change"]["units"] = "NaN"
     with pytest.raises(RuntimeError):
         load_cash_flows(finam_broker(transactions=rows), account(), START, END)
+
+
+def test_finam_shared_transfer_id_preserves_both_legs_without_claiming_complete():
+    rows = [transaction(
+        "shared", category="TRANSFER", amount=amount, change_qty={"value": quantity},
+        symbol="TEST@MISX", symbols=["TEST@MISX"], transaction_name="Перевод ценных бумаг",
+    ) for amount, quantity in [("-60000.80", "-56"), ("60000.80", "56")]]
+    original = deepcopy(rows)
+    history = load_cash_flows(finam_broker(transactions=rows + [deepcopy(rows[0])]), account(), START, END)
+    repeated = load_cash_flows(finam_broker(transactions=list(reversed(rows))), account(), START, END)
+    assert not history.complete
+    assert len(history.flows) == 2
+    assert len({flow.id for flow in history.flows}) == 2
+    assert {flow.id for flow in history.flows} == {flow.id for flow in repeated.flows}
+    assert {flow.amount for flow in history.flows} == {Decimal("-60000.80"), Decimal("60000.80")}
+    assert all(flow.kind == "other" for flow in history.flows)
+    assert any("разные записи" in reason for reason in history.reasons)
+    assert rows == original
+
+
+def test_finam_conflicting_deposit_values_remain_visible_and_incomplete():
+    rows = [transaction("shared", amount=str(value)) for value in (100, 101, 102)]
+    history = load_cash_flows(finam_broker(transactions=rows), account(), START, END)
+    assert not history.complete
+    assert [flow.amount for flow in history.flows] == [Decimal("100"), Decimal("101"), Decimal("102")]
+    assert len({flow.id for flow in history.flows}) == 3
+
+
+@pytest.mark.parametrize("category,amount,quantity,name", [
+    ("DEPOSIT", "60000", "56", "Зачисление ценных бумаг"),
+    ("WITHDRAW", "-60000", "-56", "Списание ценных бумаг"),
+    ("WITHDRAW", "0", "-49", "Списание ценных бумаг"),
+    ("WITHDRAW", "0", None, "Списание ценных бумаг"),
+    ("DEPOSIT", "0", "2", "Ввод"),
+])
+def test_finam_security_deposit_and_withdrawal_are_not_assumed_cash_flows(category, amount, quantity, name):
+    row = transaction(
+        "security", category=category, amount=amount, symbol="TEST@MISX", symbols=["TEST@MISX"],
+        transaction_name=name,
+    )
+    if quantity is not None:
+        row["change_qty"] = {"value": quantity}
+    history = load_cash_flows(finam_broker(transactions=[row]), account(), START, END)
+    assert not history.complete
+    assert history.flows[0].kind == "other"
+    assert any("ценных бумаг" in reason for reason in history.reasons)
+
+
+def redemption_rows():
+    return [
+        transaction("cash", amount="1000"),
+        transaction(
+            "redemption", day=1, category="INCOME", amount="24500", symbol="BOND@MISX", symbols=["BOND@MISX"],
+            transaction_name="Доход от погашения ценных бумаг",
+        ),
+        transaction(
+            "coupon", day=1, category="INCOME", amount="644.35", symbol="BOND@MISX", symbols=["BOND@MISX"],
+            transaction_name="Купонный доход",
+        ),
+        transaction(
+            "writeoff", day=1, category="WITHDRAW", amount="0", change_qty={"value": "-49"},
+            symbol="BOND@MISX", symbols=["BOND@MISX"], transaction_name="Списание ценных бумаг",
+        ),
+    ]
+
+
+def test_finam_matched_redemption_is_internal_and_preserves_real_external_deposit():
+    history = load_cash_flows(finam_broker(transactions=redemption_rows()), account(), START, END)
+    assert history.complete
+    by_id = {flow.id: flow for flow in history.flows}
+    assert by_id["writeoff"].kind == "other"
+    assert by_id["writeoff"].amount == 0
+    assert by_id["redemption"].kind == "income"
+    assert by_id["coupon"].amount == Decimal("644.35")
+    assert sum(flow.amount for flow in history.flows if flow.kind == "external") == Decimal("1000")
+
+
+@pytest.mark.parametrize("change", ["wrong_symbol", "different_day", "coupon_only", "multiple_symbols", "multiple_payments", "nonzero_writeoff"])
+def test_finam_redemption_requires_unambiguous_matching_payment(change):
+    rows = redemption_rows()
+    if change == "wrong_symbol":
+        rows[1].update(symbol="OTHER@MISX", symbols=["OTHER@MISX"])
+    elif change == "different_day":
+        rows[1]["timestamp"] = (START + timedelta(days=2)).isoformat()
+    elif change == "coupon_only":
+        rows[1]["transaction_name"] = "Купонный доход"
+    elif change == "multiple_symbols":
+        rows[1]["symbols"].append("OTHER@MISX")
+    elif change == "multiple_payments":
+        rows.append({**rows[1], "id": "another-redemption"})
+    else:
+        rows[3]["change"] = finam_money("-24500")
+    history = load_cash_flows(finam_broker(transactions=rows), account(), START, END)
+    assert not history.complete
+    assert next(flow for flow in history.flows if flow.id == "writeoff").kind == "other"
+
+
+def test_finam_redemption_matching_uses_moscow_day_across_utc_midnight():
+    rows = redemption_rows()
+    rows[1]["timestamp"] = (START + timedelta(hours=22)).isoformat()
+    rows[2]["timestamp"] = (START + timedelta(hours=22)).isoformat()
+    rows[3]["timestamp"] = (START + timedelta(days=1, hours=1)).isoformat()
+    history = load_cash_flows(finam_broker(transactions=rows), account(), START, END)
+    assert history.complete
+
+
+def test_finam_redemption_payment_outside_requested_window_cannot_prove_writeoff():
+    rows = redemption_rows()
+    rows[1]["timestamp"] = (START + timedelta(hours=22)).isoformat()
+    rows[3]["timestamp"] = (START + timedelta(days=1, hours=1)).isoformat()
+    history = load_cash_flows(
+        finam_broker(transactions=rows), account(), START + timedelta(days=1), END, require_inception=False,
+    )
+    assert not history.complete
 
 
 def test_tbank_cursor_history_includes_overnights_and_deduplicates_page_overlap():

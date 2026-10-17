@@ -336,6 +336,21 @@ def _report_day(tables, supplied: date | None, source_name: str) -> date | None:
         text,
         flags=re.IGNORECASE,
     )
+    beginnings = set(re.findall(
+        r"(?:на\s+)?начало\s+периода\s+(\d{2}\.\d{2}\.\d{4})", text, flags=re.IGNORECASE,
+    ))
+    endings = set(re.findall(
+        r"(?:на\s+)?конец\s+периода\s+(\d{2}\.\d{2}\.\d{4})", text, flags=re.IGNORECASE,
+    ))
+    day_counts = re.findall(
+        r"за\s+период\s*\(?\s*(\d+)\s*(?:день|дня|дней)\b", text, flags=re.IGNORECASE,
+    )
+    if any(int(count) != 1 for count in day_counts):
+        raise ValueError(f"{source_name}: для сверки фактической и плановой ВМ нужен однодневный отчет")
+    if beginnings or endings:
+        if len(beginnings) != 1 or len(endings) != 1:
+            raise ValueError(f"{source_name}: колонки начала и конца не подтверждают однодневный отчет")
+        periods.append((next(iter(beginnings)), next(iter(endings))))
     for start, end in periods:
         if start != end:
             raise ValueError(f"{source_name}: для сверки фактической и плановой ВМ нужен однодневный отчет")

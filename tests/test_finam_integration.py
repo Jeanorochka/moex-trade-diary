@@ -28,6 +28,7 @@ def integration(tmp_path, monkeypatch):
         return report, export_portfolio(report, output_dir)
 
     monkeypatch.setattr(cli, "execute_portfolio", current_portfolio)
+    monkeypatch.setattr(cli, "prepare_portfolio_report", lambda *args, **kwargs: None)
     monkeypatch.setattr(finam.primp, "Client", lambda **kwargs: SimpleNamespace())
     config = tmp_path / "config.toml"
     config.write_text(

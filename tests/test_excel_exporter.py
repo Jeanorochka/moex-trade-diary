@@ -155,3 +155,31 @@ def test_generic_writer_preserves_sheet_order_and_per_sheet_options(tmp_path):
     assert fastexcel.read_excel(path).sheet_names == ["daily", "metrics"]
     assert pl.read_excel(path, sheet_name="daily")["net"].to_list() == [41.7]
     assert pl.read_excel(path, sheet_name="metrics", has_header=False).row(0) == (1,)
+
+
+def test_diary_starts_with_full_portfolio_period_and_keeps_trades_separate(tmp_path):
+    period = {
+        "status": "complete", "base_currency": "RUB", "started_at": "2025-09-25T00:00:00+03:00",
+        "ended_at": "2026-10-17T12:00:00+03:00", "starting_equity": Decimal("10000"),
+        "ending_equity": Decimal("11200"), "external_inflows": Decimal("100"),
+        "external_outflows": Decimal("0"), "net_external_flows": Decimal("100"),
+        "total_profit": Decimal("1100"), "period_return": 0.109,
+        "annualized_return": 0.102, "xirr": None, "days": 387.5,
+        "valuation_basis": "current_broker_nav", "quality": [], "source": "Broker NAV and period ledger",
+    }
+    exporter = ExcelExporter(tmp_path)
+    path = exporter.export(
+        [replace(sample_trade(), gross_pnl=Decimal("-60"))], "finam", "123", datetime(2025, 9, 25, tzinfo=UTC),
+        datetime(2026, 10, 17, tzinfo=UTC), UTC, portfolio_period=period,
+    )
+    sheets = pl.read_excel(path, sheet_id=0)
+    assert list(sheets)[0] == "Портфель за период"
+    assert "Итоги сделок" in sheets
+    assert "Итог портфеля" not in sheets
+    frame = sheets["Портфель за период"]
+    assert frame.schema["значение"].is_numeric()
+    assert frame.filter(pl.col("показатель") == "Полный результат портфеля")["значение"].to_list() == [1100]
+    assert sheets["Сделки"]["финрез"].to_list() == [-60]
+    assert cell_format(path, 1, "B8") == "0.00%"
+    parameters = dict(sheets["Параметры расчёта"].iter_rows())
+    assert '"total_profit":"1100"' in parameters["portfolio_period"]

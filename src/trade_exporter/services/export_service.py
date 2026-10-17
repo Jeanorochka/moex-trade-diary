@@ -9,6 +9,7 @@ from trade_exporter.exporters.excel import ExcelExporter
 from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.analytics import analyze_trades
 from trade_exporter.services.risk import analyze_result_risk
+from trade_exporter.services.performance import attach_portfolio_performance
 
 
 class ExportTradeHistory:
@@ -23,6 +24,7 @@ class ExportTradeHistory:
         lookback_days: int,
         display_timezone,
         starting_capital: Decimal = Decimal(0),
+        portfolio_report=None,
     ):
         self.broker = broker
         self.matcher = matcher
@@ -31,6 +33,8 @@ class ExportTradeHistory:
         self.lookback_days = lookback_days
         self.display_timezone = display_timezone
         self.starting_capital = starting_capital
+        self.portfolio_report = portfolio_report
+        self.analysis_report = None
 
     def execute(
         self,
@@ -52,9 +56,14 @@ class ExportTradeHistory:
         ]
 
         options = {}
-        if self.starting_capital > 0:
-            report = analyze_trades(selected, self.display_timezone, self.starting_capital)
-            options["risk"] = analyze_result_risk(report.daily, self.starting_capital, period_from, period_to_exclusive)
+        report = analyze_trades(selected, self.display_timezone, self.starting_capital)
+        self.analysis_report = report
+        if self.starting_capital > 0 or self.portfolio_report is not None:
+            report.summary["risk"] = analyze_result_risk(report.daily, self.starting_capital, period_from, period_to_exclusive)
+            attach_portfolio_performance(report, self.portfolio_report)
+            options["risk"] = report.summary["risk"]
+            if "portfolio_period" in report.summary:
+                options["portfolio_period"] = report.summary["portfolio_period"]
         path = self.exporter.export(
             trades=selected,
             broker_name=self.broker.name,

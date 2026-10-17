@@ -319,13 +319,13 @@ def test_risk_sheet_has_numeric_values_units_methods_and_missing_var_reason(tmp_
     }
     workbook, json_path, html_path = export_portfolio(value, tmp_path)
     frame = pl.read_excel(workbook, sheet_name="Риск и доходность")
-    assert frame["значение"].to_list() == [0.04, None, 1310, 0.2]
+    assert frame["значение"].to_list() == [0.2, 0.04, None, 1310]
     assert frame.schema["значение"].is_numeric()
-    assert frame["единица"].to_list() == ["%", "RUB", "RUB", "%"]
-    assert frame["наблюдений"].to_list() == [8, 7, 2, 1]
-    assert "20 дневных" in frame["качество данных"][1]
-    assert frame["основание"][2] == "Сценарий изменения позиций; не VaR"
-    assert "не прогноз" in frame["основание"][3]
+    assert frame["единица"].to_list() == ["%", "%", "RUB", "RUB"]
+    assert frame["наблюдений"].to_list() == [1, 8, 7, 2]
+    assert "20 дневных" in frame["качество данных"][2]
+    assert frame["основание"][3] == "Сценарий изменения позиций; не VaR"
+    assert "не прогноз" in frame["основание"][0]
     payload = orjson.loads(json_path.read_bytes())
     assert Decimal(payload["summary"]["risk"]["metrics"][0]["value"]) == Decimal("0.04")
     text = html_path.read_text(encoding="utf-8")
@@ -340,8 +340,8 @@ def test_risk_sheet_has_numeric_values_units_methods_and_missing_var_reason(tmp_
         sheet = ElementTree.fromstring(archive.read(f"xl/worksheets/sheet{sheet_id}.xml"))
         cell = sheet.find(".//s:c[@r='B2']", namespace)
         assert cell.get("t") not in {"s", "inlineStr"}
-        assert Decimal(cell.find("s:v", namespace).text) == Decimal("0.04")
-        assert sheet.find(".//s:c[@r='B3']/s:v", namespace) is None
+        assert Decimal(cell.find("s:v", namespace).text) == Decimal("0.2")
+        assert sheet.find(".//s:c[@r='B4']/s:v", namespace) is None
 
 
 def test_initial_capital_risk_basis_and_labels_are_preserved(tmp_path):
@@ -360,3 +360,79 @@ def test_initial_capital_risk_basis_and_labels_are_preserved(tmp_path):
     text = html_path.read_text(encoding="utf-8")
     assert "Доходность от введенного начального капитала" in text
     assert "10,00%" in text
+
+
+def test_full_period_is_primary_and_unknown_lifetime_funding_is_not_zero(tmp_path):
+    value = report()
+    value.summary.update({
+        "ledger_complete": False, "returns_complete": False, "funding_status": "missing_inception_funding",
+        "total_external_inflows": Decimal("0"), "total_external_outflows": Decimal("0"),
+        "net_external_funding": Decimal("0"), "lifetime_profit": None,
+        "portfolio_period": {
+            "status": "complete", "base_currency": "RUB", "started_at": "2025-09-25T00:00:00+03:00",
+            "ended_at": "2026-10-17T12:00:00+03:00", "starting_equity": Decimal("30000"),
+            "ending_equity": Decimal("33800"), "external_inflows": Decimal("1000"),
+            "external_outflows": Decimal("0"), "net_external_flows": Decimal("1000"),
+            "total_profit": Decimal("2800"), "period_return": 0.092, "annualized_return": 0.086,
+            "xirr": None, "days": 387.5, "valuation_basis": "current_broker_nav",
+            "quality": [], "source": "Начальный NAV, текущая стоимость и подтверждённые потоки периода.",
+        },
+    })
+    value.period_flows = pl.DataFrame([{
+        "timestamp": datetime(2026, 6, 17, tzinfo=timezone.utc), "amount": Decimal("1000"),
+        "currency": "RUB", "kind": "external", "id": "period-deposit", "amount_base": Decimal("1000"),
+    }], schema=FLOW_SCHEMA)
+    workbook, json_path, html_path = export_portfolio(value, tmp_path)
+    sheets = pl.read_excel(workbook, sheet_id=0)
+    assert list(sheets)[0] == "Портфель за период"
+    assert sheets["Потоки периода"]["сумма"].to_list() == [1000]
+    assert sheets["Портфель за период"].filter(pl.col("показатель") == "Полный результат портфеля")["значение"].to_list() == [2800]
+    assert sheets["Портфель"].filter(pl.col("показатель") == "Внесено на счет")["значение"].to_list() == ["н/д"]
+    text = html_path.read_text(encoding="utf-8")
+    assert text.index('id="portfolio-period"') < text.index("Открытые позиции")
+    assert "2 800,00 ₽" in text
+    assert '<span class="label">Внесено</span><strong>н/д</strong>' in text
+    assert '<span class="label">Выведено</span><strong>н/д</strong>' in text
+    assert "Полная история внешних движений с открытия не подтверждена" in text
+    payload = orjson.loads(json_path.read_bytes())
+    assert payload["period_flows"][0]["id"] == "period-deposit"
+    assert Decimal(payload["summary"]["portfolio_period"]["total_profit"]) == 2800
+
+
+def test_unavailable_full_period_does_not_display_proxy_profit_as_nav_return(tmp_path):
+    value = report()
+    value.summary["portfolio_period"] = {
+        "status": "unavailable", "base_currency": "RUB", "starting_equity": Decimal("30000"),
+        "ending_equity": Decimal("33800"), "total_profit": Decimal("999"),
+        "period_return": 0.99, "annualized_return": 9.99, "xirr": 8.88,
+        "quality": ["Не подтверждены внешние движения выбранного периода."], "source": "Broker NAV",
+    }
+    workbook, _, html_path = export_portfolio(value, tmp_path)
+    frame = pl.read_excel(workbook, sheet_name="Портфель за период")
+    for label in ("Полный результат портфеля", "Доходность портфеля за период", "Годовой пересчёт доходности портфеля", "Годовая денежно-взвешенная доходность (XIRR)"):
+        assert frame.filter(pl.col("показатель") == label)["значение"].to_list() == [None]
+    assert frame.filter(pl.col("показатель") == "Капитал в начале")["значение"].to_list() == [30000]
+    text = html_path.read_text(encoding="utf-8")
+    assert "Полный результат недоступен" in text
+    assert "999,00 ₽" not in text
+    assert "99,00%" not in text
+
+
+def test_actual_period_risk_precedes_trading_proxy_with_matching_percent_formats(tmp_path):
+    value = report()
+    value.summary["risk"] = {
+        "as_of": "2026-10-17", "metrics": [
+            {"metric": "proxy_max_drawdown", "label": "Торговая просадка", "value": 0.4, "unit": "fraction", "basis": "closed_pnl_proxy"},
+            {"metric": "max_drawdown_observed", "label": "Фактическая просадка NAV", "value": None, "unit": "fraction", "basis": "actual_nav"},
+            {"metric": "capital_period_return", "label": "Доходность портфеля за период", "value": 0.0248, "unit": "fraction", "basis": "starting_capital_assumption"},
+            {"metric": "capital_period_profit", "label": "Полный результат периода", "value": Decimal("3234.22"), "unit": "RUB", "basis": "starting_capital_assumption"},
+        ], "quality": [],
+    }
+    workbook, _, html_path = export_portfolio(value, tmp_path)
+    frame = pl.read_excel(workbook, sheet_name="Риск и доходность")
+    assert frame["показатель"].to_list() == ["Полный результат периода", "Доходность портфеля за период", "Фактическая просадка NAV", "Торговая просадка"]
+    assert frame["значение"].to_list() == [3234.22, 0.0248, None, 0.4]
+    assert "без полной переоценки портфеля" in frame["основание"][-1]
+    text = html_path.read_text(encoding="utf-8")
+    assert "2,48%" in text
+    assert "40,00%" in text

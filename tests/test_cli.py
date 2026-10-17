@@ -44,6 +44,7 @@ def test_export_and_analyze_share_selected_closed_trades(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "create_broker", lambda *args: Broker())
     monkeypatch.setattr(cli, "print_portfolio", lambda *args, **kwargs: ())
+    monkeypatch.setattr(cli, "prepare_portfolio_report", lambda *args, **kwargs: None)
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     path = cli.main([
@@ -120,3 +121,29 @@ def test_current_portfolio_does_not_prompt_dates_or_request_closed_trades(broker
 def test_current_portfolio_rejects_historical_date_label():
     with pytest.raises(SystemExit):
         cli.parse_args(["--portfolio", "--to", "11.09.26"])
+
+
+@pytest.mark.parametrize("broker_name", ["finam", "tbank"])
+def test_trade_history_error_still_saves_prepared_nav_report(broker_name, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    account = Account("1", "test", broker_name, opened_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    prepared = SimpleNamespace(summary={"equity": Decimal(120)})
+    saved = []
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("trade history unavailable")
+
+    broker = SimpleNamespace(name=broker_name, list_accounts=lambda: [account], get_fills=unavailable)
+    monkeypatch.setattr(cli, "create_broker", lambda *args: broker)
+    monkeypatch.setattr(cli, "prepare_portfolio_report", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr(cli, "execute_finam", unavailable)
+    monkeypatch.setattr(cli, "print_portfolio", lambda *args, **kwargs: saved.append(kwargs["report"]))
+    config = tmp_path / "config.toml"
+    config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="trade history unavailable"):
+        cli.main([
+            "--config", str(config), "--broker", broker_name, "--account-id", "1",
+            "--from", "11.09.26", "--to", "11.09.26", "--output-dir", str(tmp_path),
+        ])
+    assert saved == [prepared]

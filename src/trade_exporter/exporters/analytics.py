@@ -9,7 +9,7 @@ import orjson
 import polars as pl
 
 from trade_exporter.exporters.excel import write_workbook
-from trade_exporter.exporters.portfolio import risk_sheet, risk_sheet_options
+from trade_exporter.exporters.portfolio import portfolio_period_sheet, portfolio_period_sheet_options, risk_sheet, risk_sheet_options
 from trade_exporter.services.analytics import AnalysisReport
 
 
@@ -61,11 +61,17 @@ HEADERS = {
 
 
 def analysis_metadata(summary: dict) -> pl.DataFrame:
-    return pl.DataFrame([
-        (key, orjson.dumps(summary[key]).decode())
-        for key in ("commission_complete", "commission_basis", "commission_quality", "net_pnl_basis", "synthetic_trade_ids", "execution_quality", "result_complete", "result_quality", "excluded_instruments")
-        if key in summary
-    ], schema={"ключ": pl.String, "значение": pl.String}, orient="row")
+    rows = []
+    for key in ("commission_complete", "commission_basis", "commission_quality", "net_pnl_basis", "synthetic_trade_ids", "execution_quality", "result_complete", "result_quality", "excluded_instruments", "portfolio_period", "risk"):
+        if key not in summary:
+            continue
+        value = orjson.dumps(summary[key], default=_json_default).decode()
+        if len(value) <= 12000:
+            rows.append((key, value))
+        else:
+            rows.extend((f"{key}__part_{index // 12000 + 1:04d}", value[index:index + 12000])
+                        for index in range(0, len(value), 12000))
+    return pl.DataFrame(rows, schema={"ключ": pl.String, "значение": pl.String}, orient="row")
 
 
 def _json_default(value):
@@ -122,15 +128,19 @@ def _chart(frame, sheet, column, title, chart_type="line"):
     }
 
 
-def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="analytics"):
+def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="analytics", *, portfolio_period=None, risk=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     stem = output_dir / f"{prefix}_{stamp}"
     workbook_path = stem.with_suffix(".xlsx")
     json_path = stem.with_suffix(".json")
+    portfolio_period = portfolio_period if portfolio_period is not None else report.summary.get("portfolio_period")
+    risk = risk if risk is not None else report.summary.get("risk")
+    metadata_summary = report.summary | ({"portfolio_period": portfolio_period} if portfolio_period is not None else {}) | ({"risk": risk} if risk is not None else {})
     labels = [key for key, value in report.summary.items()
-              if value is None or isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)]
+              if key not in {"headline_profit", "headline_return"}
+              and (value is None or isinstance(value, (int, float, Decimal)) and not isinstance(value, bool))]
     result_events = "event_type" in report.trades.columns
     partial_fees = report.summary.get("commission_complete") is False
     summary_labels = SUMMARY_LABELS | ({
@@ -158,6 +168,15 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
             "gross_pnl": "Частичный gross P&L; исключённые инструменты не учтены",
             "net_pnl": "Частичный результат после известных комиссий" if partial_fees else "Частичный net P&L; исключённые инструменты не учтены",
         }
+    if portfolio_period is not None:
+        summary_labels = summary_labels | {
+            "gross_pnl": "Результат закрытий и ВМ до комиссий",
+            "net_pnl": "Результат закрытий и ВМ после комиссий",
+            "return_on_capital": "Результат закрытий и ВМ / начальный капитал",
+            "starting_capital": "Начальный капитал торговой модели",
+        }
+        if partial_fees or report.summary.get("result_complete") is False:
+            summary_labels["net_pnl"] = "Частичный результат закрытий и ВМ после известных комиссий"
     summary = pl.DataFrame({
         "показатель": [summary_labels.get(key, key) for key in labels],
         "значение": [
@@ -172,6 +191,8 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
         "Месяцы": _display_frame(report.monthly, monthly=True, result_events=result_events, partial_fees=partial_fees),
         "Тикеры": _display_frame(report.by_ticker, result_events=result_events, partial_fees=partial_fees),
     }
+    if portfolio_period is not None:
+        sheets = {"Портфель за период": portfolio_period_sheet(portfolio_period), **sheets}
     if "commission_complete" in report.summary:
         fee_basis = report.summary.get("commission_basis", "Основа комиссий в исходном файле не указана.")
         basis = {
@@ -185,10 +206,9 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
             *(("Идентификаторы исполнений", reason) for reason in report.summary.get("execution_quality", [])),
             *(("Полнота результата", reason) for reason in report.summary.get("result_quality", [])),
         ], schema={"раздел": pl.String, "основа расчёта": pl.String}, orient="row")
-    metadata = analysis_metadata(report.summary)
+    metadata = analysis_metadata(metadata_summary)
     if not metadata.is_empty():
         sheets["Параметры расчёта"] = metadata
-    risk = report.summary.get("risk")
     if risk is not None:
         sheets["Риск и доходность"] = risk_sheet(risk)
     options = {}
@@ -219,6 +239,10 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
             if report.summary.get(key) is not None
         },
     }
+    if portfolio_period is not None:
+        options["Портфель за период"] = portfolio_period_sheet_options(portfolio_period)
+    if "Параметры расчёта" in sheets:
+        options["Параметры расчёта"] = {"column_widths": {0: 40, 1: 80}}
     if risk is not None:
         options["Риск и доходность"] = risk_sheet_options(risk)
     if not report.daily.is_empty():
@@ -236,7 +260,7 @@ def export_analysis(report: AnalysisReport, output_dir: str | Path, prefix="anal
         }
     write_workbook(workbook_path, sheets, sheet_options=options)
     payload = {
-        "summary": report.summary,
+        "summary": metadata_summary,
         "daily": report.daily.to_dicts(),
         "monthly": report.monthly.to_dicts(),
         "by_ticker": report.by_ticker.to_dicts(),

@@ -202,6 +202,77 @@ def test_position_report_day_must_match_request_and_be_single_day(tmp_path):
         parse_finam_margins([path])
 
 
+def calendar_positions(path, first="11.09.2026", last="11.09.2026", count="1 день", extra=""):
+    text = "<html><body>" + html_table([
+        ["", f"На начало периода {first}", f"На конец периода {last}", f"Изменение за период ({count})"],
+        ["ИТОГО оценка состояния счета (руб.)", "100", "115", "15"],
+    ]) + html_table([
+        ["Оценка позиции по Производным финансовым инструментам, руб."],
+        ["Инструмент", "Вариационная маржа факт", "Вариационная маржа план"],
+        ["RIU6", "10", "5"],
+    ]) + extra + "</body></html>"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_actual_calendar_column_headers_identify_single_day_without_period_sentence(tmp_path):
+    extra = html_table([["Дата сделки", "Инструмент"], ["10.09.2026", "TEST"]])
+    path = calendar_positions(tmp_path / "calendar.html", extra=extra)
+    result = parse_finam_margins([path])
+    assert result["date"].to_list() == [date(2026, 9, 11)]
+    assert result["gross_pnl"].to_list() == [Decimal("15")]
+
+
+@pytest.mark.parametrize("first,last,count", [
+    ("10.09.2026", "11.09.2026", "2 дня"),
+    ("10.09.2026", "11.09.2026", "1 день"),
+    ("11.09.2026", "11.09.2026", "2дня"),
+    ("11.09.2026", "11.09.2026", "12 дней"),
+])
+def test_actual_calendar_headers_reject_multi_day_report_despite_supplied_day(tmp_path, first, last, count):
+    path = calendar_positions(tmp_path / "calendar.html", first, last, count)
+    with pytest.raises(ValueError, match="однодневный"):
+        parse_finam_margins([path], report_dates={path: date(2026, 9, 11)})
+
+
+def test_actual_calendar_column_day_must_match_supplied_day(tmp_path):
+    path = calendar_positions(tmp_path / "calendar.html", count="1день")
+    with pytest.raises(ValueError, match="противоречит запрошенной"):
+        parse_finam_margins([path], report_dates={path: date(2026, 9, 12)})
+
+
+def test_actual_calendar_headers_must_agree_with_legacy_period_sentence(tmp_path):
+    path = calendar_positions(
+        tmp_path / "calendar.html", extra="<p>за период с 12.09.2026 по 12.09.2026</p>",
+    )
+    with pytest.raises(ValueError, match="противоречит запрошенной"):
+        parse_finam_margins([path])
+
+
+def test_repeated_consistent_calendar_headers_are_allowed(tmp_path):
+    path = calendar_positions(tmp_path / "calendar.html", extra=html_table([
+        ["Начало периода 11.09.2026", "Конец периода 11.09.2026"],
+    ]))
+    assert parse_finam_margins([path])["date"].to_list() == [date(2026, 9, 11)]
+
+
+def test_inconsistent_calendar_columns_cannot_claim_single_day(tmp_path):
+    path = calendar_positions(tmp_path / "calendar.html", extra=html_table([
+        ["На начало периода 10.09.2026", "На конец периода 11.09.2026"],
+    ]))
+    with pytest.raises(ValueError, match="однодневный"):
+        parse_finam_margins([path], report_dates={path: date(2026, 9, 11)})
+
+
+def test_multi_day_count_alone_cannot_be_overridden_by_supplied_date(tmp_path):
+    path = positions(
+        tmp_path / "calendar.xls", "11.09.2026", [["RIU6", "10", "5", "1"]],
+        html_table([["Изменение за период (2 дня)"]]),
+    )
+    with pytest.raises(ValueError, match="однодневный"):
+        parse_finam_margins([path], report_dates={path: date(2026, 9, 11)})
+
+
 def test_same_daily_snapshot_is_not_counted_twice(tmp_path):
     first = positions(tmp_path / "one.xls", "11.09.2026", [["RIU6", "10", "5", "1"]])
     second = positions(tmp_path / "two.xls", "11.09.2026", [["RIU6", "10", "5", "1"]])

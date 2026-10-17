@@ -4,8 +4,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
+from hashlib import sha256
 import re
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
+
+import orjson
 
 from trade_exporter.domain.portfolio import (
     CashBalance,
@@ -383,7 +387,41 @@ def _enum(value, mapping: dict[int, str], prefix="") -> str:
     return raw.removeprefix(prefix)
 
 
-def _finam_flow(item: dict, base: str, reasons: list[str]) -> CashFlow:
+def _finam_redemption_ids(items: list[dict], base: str) -> set[str]:
+    groups = defaultdict(lambda: {"withdrawals": [], "payments": []})
+    for item in items:
+        symbol = item.get("symbol")
+        symbols = item.get("symbols")
+        if not isinstance(symbol, str) or "@" not in symbol or not all(symbol.rsplit("@", 1)):
+            continue
+        if symbols is not None and symbols != [symbol]:
+            continue
+        category = _enum(item.get("transaction_category", item.get("category", "OTHERS")), FINAM_CATEGORIES)
+        name = " ".join(str(item.get("transaction_name") or "").lower().split())
+        if category == "WITHDRAW" and name == "списание ценных бумаг":
+            amount, currency = _money(item.get("change"), "Finam.transaction.change")
+            quantity = _decimal(item.get("change_qty"), "Finam.transaction.change_qty", optional=True)
+            if amount or currency != base or quantity is None or quantity >= 0:
+                continue
+            group = "withdrawals"
+        elif category == "INCOME" and name == "доход от погашения ценных бумаг":
+            amount, currency = _money(item.get("change"), "Finam.transaction.change")
+            quantity = _decimal(item.get("change_qty"), "Finam.transaction.change_qty", optional=True)
+            if amount <= 0 or currency != base or quantity:
+                continue
+            group = "payments"
+        else:
+            continue
+        day = _timestamp(item.get("timestamp"), "Finam.transaction.timestamp").astimezone(ZoneInfo("Europe/Moscow")).date()
+        groups[(symbol, day)][group].append(item["id"])
+    return {
+        rows["withdrawals"][0]
+        for rows in groups.values()
+        if len(rows["withdrawals"]) == len(rows["payments"]) == 1
+    }
+
+
+def _finam_flow(item: dict, base: str, reasons: list[str], *, redemption_ids: set[str] | None = None) -> CashFlow:
     category = _enum(item.get("transaction_category", item.get("category", "OTHERS")), FINAM_CATEGORIES)
     if item.get("change") is None and category == "TRANSFER":
         amount, currency = ZERO, base
@@ -391,9 +429,18 @@ def _finam_flow(item: dict, base: str, reasons: list[str]) -> CashFlow:
         amount, currency = _money(item.get("change"), "Finam.transaction.change")
     kind = "other"
     if category in {"DEPOSIT", "WITHDRAW"}:
-        if (category == "DEPOSIT" and amount < 0) or (category == "WITHDRAW" and amount > 0):
+        quantity = _decimal(item.get("change_qty"), "Finam.transaction.change_qty", optional=True)
+        security_movement = bool(quantity) or bool(re.search(
+            r"ценн\w*\s+бумаг", str(item.get("transaction_name") or ""), flags=re.IGNORECASE,
+        ))
+        if item["id"] in (redemption_ids or set()):
+            pass
+        elif security_movement:
+            reasons.append("Finam: ввод или списание ценных бумаг требует сверки внешнего потока; change не подтверждает денежный ввод/вывод")
+        elif (category == "DEPOSIT" and amount < 0) or (category == "WITHDRAW" and amount > 0):
             raise RuntimeError("Finam: знак ввода/вывода противоречит категории транзакции")
-        kind = "external"
+        else:
+            kind = "external"
     elif category == "INCOME":
         kind = "income"
     elif category in {"COMMISSION", "OUTCOMES", "FINE"}:
@@ -495,15 +542,30 @@ def load_cash_flows(broker, account, start, end, *, require_inception=True) -> C
     else:
         raw = _tbank_operations(broker, account.id, start, end)
     unique = {}
+    variants = defaultdict(dict)
     for item in raw:
         identity = item.get("id")
         if not isinstance(identity, str) or not identity:
             raise RuntimeError(f"{broker.name}: отсутствует идентификатор денежной операции, полнота истории не подтверждена")
         if identity in unique and unique[identity] != item:
-            raise RuntimeError(f"{broker.name}: противоречивые данные одной денежной операции")
+            if broker.name != "finam":
+                raise RuntimeError(f"{broker.name}: противоречивые данные одной денежной операции")
+            variants[identity][orjson.dumps(unique[identity], option=orjson.OPT_SORT_KEYS)] = unique[identity]
+            variants[identity][orjson.dumps(item, option=orjson.OPT_SORT_KEYS)] = item
         unique.setdefault(identity, item)
+    for identity, records in variants.items():
+        del unique[identity]
+        for content, item in sorted(records.items()):
+            variant_id = identity + "#record:" + sha256(content).hexdigest()
+            if variant_id in unique:
+                raise RuntimeError("Finam: невозможно различить денежные операции с повторяющимся идентификатором")
+            unique[variant_id] = {**item, "id": variant_id}
+        reasons.append("Finam: один идентификатор содержит разные записи; все записи сохранены, полнота и назначение движения требуют сверки")
     base = _base(broker)
-    transform = _finam_flow if broker.name == "finam" else _tbank_flow
-    flows = [transform(item, base, reasons) for item in unique.values()]
+    if broker.name == "finam":
+        redemption_ids = _finam_redemption_ids(list(unique.values()), base)
+        flows = [_finam_flow(item, base, reasons, redemption_ids=redemption_ids) for item in unique.values()]
+    else:
+        flows = [_tbank_flow(item, base, reasons) for item in unique.values()]
     flows.sort(key=lambda flow: flow.timestamp)
     return CashFlowHistory(tuple(flows), not reasons, tuple(dict.fromkeys(reasons)), start)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from pathlib import Path
+import re
 from zoneinfo import ZoneInfo
 
 import fastexcel
@@ -11,6 +12,7 @@ import orjson
 import polars as pl
 
 from trade_exporter.domain.models import ClosedTrade
+from trade_exporter.services.performance import validate_portfolio_period
 
 
 MONEY = pl.Decimal(precision=38, scale=18)
@@ -353,7 +355,28 @@ def analyze_file(
             "synthetic_trade_ids": int, "execution_quality": list,
             "result_complete": bool, "result_quality": list, "excluded_instruments": list,
         }
+        types.update({"portfolio_period": dict, "risk": dict})
+        raw_metadata = {}
+        parts = {}
         for key, raw in parameters.iter_rows():
+            match = re.fullmatch(r"(risk|portfolio_period)__part_([0-9]{4})", str(key))
+            if match:
+                name, index = match.group(1), int(match.group(2))
+                entries = parts.setdefault(name, {})
+                if index in entries or not isinstance(raw, str):
+                    raise ValueError("повторяющаяся или некорректная часть параметра")
+                entries[index] = raw
+                continue
+            if key not in types:
+                continue
+            if key in raw_metadata:
+                raise ValueError(f"повторяющийся параметр {key}")
+            raw_metadata[key] = raw
+        for name, entries in parts.items():
+            if name in raw_metadata or sorted(entries) != list(range(1, len(entries) + 1)):
+                raise ValueError("неполные или неоднозначные части параметра")
+            raw_metadata[name] = "".join(entries[index] for index in sorted(entries))
+        for key, raw in raw_metadata.items():
             if key not in types:
                 continue
             if key in metadata:
@@ -366,12 +389,45 @@ def analyze_file(
             if key in {"commission_quality", "execution_quality", "result_quality", "excluded_instruments"} and any(not isinstance(reason, str) for reason in value):
                 raise ValueError("причины неполноты должны быть текстом")
             metadata[key] = value
-        if metadata and "commission_complete" not in metadata:
+        fee_fields = {"commission_basis", "commission_quality", "net_pnl_basis"}
+        if fee_fields.intersection(metadata) and "commission_complete" not in metadata:
             raise ValueError("не указана полнота комиссий")
         if metadata.get("commission_complete") is False:
             metadata["net_pnl_basis"] = "gross_less_known_fees"
             if not metadata.get("commission_quality"):
                 metadata["commission_quality"] = ["Полные комиссии исходной выгрузки не подтверждены; учтены только известные расходы."]
+        if "portfolio_period" in metadata:
+            period = validate_portfolio_period(metadata["portfolio_period"])
+            saved_capital = period.get("starting_equity")
+            if saved_capital is not None and starting_capital > 0 and starting_capital != saved_capital:
+                raise ValueError("Стартовый капитал отличается от записанного в оценке портфеля")
+            if saved_capital is not None and starting_capital == 0:
+                report = analyze_results(frame, saved_capital) if "event_type" in normalized else analyze_frame(frame, saved_capital)
+            metadata["portfolio_period"] = period
+            metadata["headline_basis"] = "portfolio_period"
+            metadata["headline_profit"] = period.get("total_profit") if period["status"] == "complete" else None
+            metadata["headline_return"] = period.get("period_return") if period["status"] == "complete" else None
+        if "risk" in metadata:
+            risk = metadata["risk"]
+            if not isinstance(risk.get("metrics"), list) or not isinstance(risk.get("quality", []), list):
+                raise ValueError("неверная структура показателей риска")
+            names = set()
+            for row in risk["metrics"]:
+                if not isinstance(row, dict) or not isinstance(row.get("metric"), str) or row["metric"] in names:
+                    raise ValueError("неверный или повторяющийся показатель риска")
+                names.add(row["metric"])
+                if row.get("value") is not None:
+                    row["value"] = _money(row["value"], 0, row["metric"], round_excess=True)
+            period = metadata.get("portfolio_period")
+            if period is not None:
+                from trade_exporter.services.risk import analyze_result_risk
+
+                start, end = period.get("started_at"), period.get("requested_end") or period.get("ended_at")
+                if start and end:
+                    proxy = analyze_result_risk(report.daily, period.get("starting_equity") or ZERO, datetime.fromisoformat(start), datetime.fromisoformat(end), period["base_currency"])
+                    risk["metrics"] = [row for row in risk["metrics"] if not row["metric"].startswith("proxy_")] + proxy["metrics"]
+                    for row in proxy["metrics"]:
+                        row["quality_reason"] = " ".join(filter(None, (row.get("quality_reason"), *metadata.get("commission_quality", ()), *metadata.get("result_quality", ()))))
         report.summary.update(metadata)
     except (ValueError, TypeError, pl.exceptions.PolarsError) as error:
         raise ValueError(f"Некорректные параметры расчёта в {path.name}: {error}") from error

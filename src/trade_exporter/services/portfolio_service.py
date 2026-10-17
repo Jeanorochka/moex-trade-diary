@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 from hashlib import sha256
 import os
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import orjson
+import polars as pl
 
 from trade_exporter.brokers.portfolio import CashFlowHistory, load_cash_flows, load_portfolio
 from trade_exporter.domain.portfolio import CashFlow, PortfolioSnapshot
 from trade_exporter.exporters.portfolio import export_portfolio
 from trade_exporter.services.portfolio import analyze_portfolio, normalize_cash_flows
 from trade_exporter.services.risk import analyze_portfolio_risk
+from trade_exporter.services.performance import validate_portfolio_period
 
 
 def _datetime(value):
@@ -156,7 +160,7 @@ def observed_performance(records: list[dict], flows: tuple[CashFlow, ...], *, le
         }, ([] if weighted_capital > 0 else ["Доходность не определена: взвешенный вложенный капитал неположительный."])
 
 
-def execute_portfolio(
+def prepare_portfolio_report(
     broker, account, output_dir: Path, *, captured_at=None,
     starting_capital=Decimal(0), capital_started_at=None, results=None,
     result_period_start=None, result_period_end=None, results_quality=(), progress=None,
@@ -175,7 +179,7 @@ def execute_portfolio(
             )
     except RuntimeError as error:
         history_error = str(error)
-        history = CashFlowHistory((), False, ("История денежных потоков не получена.",), account.opened_at)
+        history = CashFlowHistory((), False, ("История денежных потоков с открытия счёта не получена.",), account.opened_at)
     report = analyze_portfolio(
         snapshot, history.flows, ledger_complete=history.complete, ledger_start=history.started_at,
     )
@@ -217,15 +221,92 @@ def execute_portfolio(
                 )
             except RuntimeError:
                 risk_history = CashFlowHistory((), False, ("Денежные операции периода не получены; изменение капитала может включать пополнения и выводы.",), capital_started_at)
+    evaluation_at = snapshot.captured_at
+    ending_equity = snapshot.equity
+    valuation_basis = "current_broker_nav"
+    valuation_source = snapshot.source
+    valuation_quality = []
+    if result_period_end is not None and result_period_end <= snapshot.captured_at:
+        evaluation_at = result_period_end - timedelta(microseconds=1)
+        try:
+            if starting_capital <= 0:
+                raise ValueError("Для результата исторического периода укажи стартовый капитал")
+            broker_end = result_period_end.astimezone(ZoneInfo("Europe/Moscow"))
+            if getattr(broker, "name", None) == "finam" and (broker_end.hour, broker_end.minute, broker_end.second, broker_end.microsecond) != (0, 0, 0, 0):
+                raise ValueError("Исторический отчёт Финама подтверждает только конец календарного дня по Москве; выбери timezone=Europe/Moscow")
+            from trade_exporter.services.historical_valuation import load_historical_valuation
+
+            status("Получение исторической стоимости портфеля на конец периода")
+            valuation = load_historical_valuation(broker, account, (broker_end - timedelta(microseconds=1)).date(), output_dir)
+            if valuation.currency != snapshot.base_currency:
+                raise RuntimeError("Историческая оценка выражена в другой валюте")
+            ending_equity = valuation.equity
+            valuation_source = str(valuation.source_file)
+            valuation_basis = "historical_broker_report"
+            valuation_quality.extend(valuation.quality)
+        except (RuntimeError, ValueError) as error:
+            ending_equity = None
+            valuation_basis = "unavailable_historical_nav"
+            valuation_source = ""
+            valuation_quality.append(f"Оценка портфеля на выбранную конечную дату не получена: {error}")
+    period_flows = tuple(
+        flow for flow in risk_history.flows
+        if (capital_started_at is None or flow.timestamp > capital_started_at) and flow.timestamp <= evaluation_at
+    )
+    report = replace(report, period_flows=pl.DataFrame([{
+        "timestamp": flow.timestamp.astimezone(timezone.utc), "amount": flow.amount,
+        "currency": flow.currency, "kind": flow.kind, "id": flow.id,
+        "amount_base": flow.amount if flow.currency == snapshot.base_currency else None,
+    } for flow in period_flows], schema=report.flows.schema))
+    report.summary["period_ledger_complete"] = risk_history.complete
+    report.summary["period_ledger_start"] = risk_history.started_at.isoformat() if risk_history.started_at else None
+    report.summary["period_cash_flow_quality"] = list(risk_history.reasons)
     report.summary["starting_capital"] = starting_capital
     report.summary["capital_started_at"] = capital_started_at.isoformat() if capital_started_at else None
     report.summary["result_period_start"] = (result_period_start or capital_started_at).isoformat() if result_period_start or capital_started_at else None
     report.summary["result_period_end"] = result_period_end.isoformat() if result_period_end else None
+    risk_summary = dict(report.summary)
+    if evaluation_at != snapshot.captured_at:
+        risk_summary.update({
+            "captured_at": evaluation_at.isoformat(), "equity": ending_equity or Decimal(0),
+            "valuation_history": [row for row in records if _datetime(row["captured_at"]) <= evaluation_at],
+            "observed_period": None, "returns_complete": False, "xirr": None,
+            "gross_exposure": None, "positions_count": 0, "allocation_complete": False,
+        })
     report.summary["risk"] = analyze_portfolio_risk(
-        report.summary, risk_history.flows,
+        risk_summary, tuple(flow for flow in risk_history.flows if flow.timestamp <= evaluation_at),
         ledger_complete=risk_history.complete, ledger_start=risk_history.started_at,
         starting_capital=starting_capital, capital_started_at=capital_started_at, results=results,
     )
+    metrics = {row["metric"]: row for row in report.summary["risk"]["metrics"]}
+    if ending_equity is None:
+        for name, row in metrics.items():
+            if name.startswith("capital_") or name == "current_equity":
+                row["value"] = None
+                row["quality_reason"] = " ".join(valuation_quality)
+    if evaluation_at != snapshot.captured_at:
+        metrics["current_equity"]["label"] = "Стоимость портфеля на конец выбранного периода"
+    external = [flow for flow in period_flows if flow.kind == "external" and flow.currency == snapshot.base_currency]
+    complete = ending_equity is not None and metrics["capital_period_profit"]["value"] is not None
+    reason = metrics["capital_period_profit"].get("quality_reason")
+    period_quality = list(dict.fromkeys([*risk_history.reasons, *valuation_quality, *([reason] if reason else [])]))
+    report.summary["portfolio_period"] = validate_portfolio_period({
+        "status": "complete" if complete else "unavailable", "base_currency": snapshot.base_currency,
+        "started_at": capital_started_at.isoformat() if capital_started_at else None,
+        "ended_at": evaluation_at.isoformat(), "requested_end": result_period_end.isoformat() if result_period_end else None,
+        "starting_equity": starting_capital if starting_capital > 0 else None,
+        "ending_equity": ending_equity,
+        "external_inflows": sum((flow.amount for flow in external if flow.amount > 0), Decimal(0)) if complete else None,
+        "external_outflows": -sum((flow.amount for flow in external if flow.amount < 0), Decimal(0)) if complete else None,
+        "net_external_flows": sum((flow.amount for flow in external), Decimal(0)) if complete else None,
+        "external_flows": [{"timestamp": flow.timestamp.isoformat(), "amount": flow.amount, "currency": flow.currency} for flow in external],
+        "total_profit": metrics["capital_period_profit"]["value"] if complete else None,
+        "period_return": metrics["capital_period_return"]["value"] if complete else None,
+        "annualized_return": metrics["capital_period_annualized"]["value"] if complete else None,
+        "xirr": metrics["capital_period_xirr"]["value"] if complete else None,
+        "days": (evaluation_at - capital_started_at).total_seconds() / 86400 if capital_started_at else None,
+        "valuation_basis": valuation_basis, "source": valuation_source, "quality": period_quality,
+    })
     report.summary["risk"]["quality"].extend(
         reason for reason in risk_history.reasons if reason not in report.summary["risk"]["quality"]
     )
@@ -235,7 +316,17 @@ def execute_portfolio(
         for row in report.summary["risk"]["metrics"]:
             if row["metric"].startswith("proxy_"):
                 row["quality_reason"] = " ".join(filter(None, (row.get("quality_reason"), reason)))
-    prefix = f"portfolio_{snapshot.broker}_{sha256(snapshot.account_id.encode()).hexdigest()[:8]}"
-    status("Сохранение портфеля, финансовых показателей и графиков")
-    paths = export_portfolio(report, output_dir, prefix=prefix)
+    return report
+
+
+def save_portfolio_report(report, output_dir: Path, *, progress=None):
+    (progress or (lambda message: None))("Сохранение портфеля, финансовых показателей и графиков")
+    summary = report.summary
+    prefix = f"portfolio_{summary['broker']}_{sha256(summary['account_id'].encode()).hexdigest()[:8]}"
+    return export_portfolio(report, output_dir, prefix=prefix)
+
+
+def execute_portfolio(broker, account, output_dir: Path, **options):
+    report = prepare_portfolio_report(broker, account, output_dir, **options)
+    paths = save_portfolio_report(report, output_dir, progress=options.get("progress"))
     return report, paths

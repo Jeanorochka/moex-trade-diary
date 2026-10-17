@@ -149,7 +149,7 @@ def test_whole_portfolio_combines_stock_fifo_and_report_vm_with_actual_futures_f
     assert all(source.read_bytes() == b"raw original broker report" for source in sources)
     assert reports.report_dates[sources[0]] == date(2025, 12, 31)
     workbook = pl.read_excel(path, sheet_id=0, engine="calamine")
-    assert {"Сделки", "Исполнения ФИНАМ", "Фьючерсы", "Итог портфеля", "Результаты", "Основа расчёта"} <= set(workbook)
+    assert {"Сделки", "Исполнения ФИНАМ", "Фьючерсы", "Торговый результат", "Результаты", "Основа расчёта"} <= set(workbook)
     assert workbook["Сделки"].height == 2
     assert workbook["Исполнения ФИНАМ"].height == 4
     assert workbook["Фьючерсы"].height == 2
@@ -266,7 +266,7 @@ def test_report_baseline_uses_local_calendar_day(reports, tmp_path):
         execution("a", "SiZ6@RTSX", "SIDE_BUY", 100, 1, 1, "2026-01-01T12:00:00Z"),
     ])
     execute_finam(broker, ExcelExporter(tmp_path), ACCOUNT, start, end, zone)
-    assert reports.calls[0] == ("123", datetime(2025, 12, 31, tzinfo=zone), end, 1)
+    assert reports.calls[0] == ("123", datetime(2025, 12, 31, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC), 1)
 
 
 def test_lookback_reconstruction_uses_configured_history_window(reports, tmp_path):

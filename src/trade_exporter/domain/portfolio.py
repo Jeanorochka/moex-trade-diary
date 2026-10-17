@@ -137,3 +137,4 @@ class PortfolioReport:
     allocation: pl.DataFrame
     cash: pl.DataFrame
     flows: pl.DataFrame
+    period_flows: pl.DataFrame | None = None
