@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trade-exporter"
-version = "2.1.1"
+version = "2.2.0"
 description = "Trade history export, analytics and charts with Rust-backed libraries"
 requires-python = ">=3.11"
 dependencies = [

@@ -17,6 +17,7 @@ from trade_exporter.services.analytics import analyze_file, analyze_trades
 from trade_exporter.services.export_service import ExportTradeHistory
 from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
+from trade_exporter.services.portfolio_service import execute_portfolio
 
 
 def parse_args(argv=None):
@@ -30,6 +31,7 @@ def parse_args(argv=None):
     analysis = parser.add_mutually_exclusive_group()
     analysis.add_argument("--analyze", type=Path, metavar="DIARY", help="Анализ готового Excel без API брокера")
     analysis.add_argument("--analytics", action="store_true", help="Аналитика и графики после выгрузки")
+    analysis.add_argument("--portfolio", action="store_true", help="Текущий портфель, переоценка позиций и доходность с учётом денежных потоков")
     parser.add_argument("--output-dir", type=Path, help="Каталог результатов")
     parser.add_argument("--starting-capital", default="0", help="Начальный капитал для относительных метрик")
     args = parser.parse_args(argv)
@@ -41,6 +43,8 @@ def parse_args(argv=None):
         parser.error("Начальный капитал должен быть конечным неотрицательным числом.")
     if args.analyze and any((args.broker, args.token, args.account_id, args.date_from, args.date_to)):
         parser.error("--analyze анализирует файл целиком; параметры брокера и дат к нему не применяются.")
+    if args.portfolio and (args.date_from or args.date_to):
+        parser.error("--portfolio получает текущую оценку; исторические даты относятся к выгрузке сделок.")
     return args
 
 
@@ -91,6 +95,24 @@ def print_analysis(report, output_dir):
     return workbook, json_path
 
 
+def print_portfolio(broker, account, output_dir):
+    report, paths = execute_portfolio(broker, account, output_dir)
+    summary = report.summary
+    currency = summary["base_currency"]
+    print(f"\nТекущая стоимость портфеля: {summary['equity']:.2f} {currency}")
+    unrealized = summary.get("unrealized_pnl")
+    print(f"Открытый результат: {unrealized:.2f} {currency}" if unrealized is not None else "Открытый результат: смотри позиции и полноту оценки в отчёте")
+    profit = summary.get("lifetime_profit")
+    if profit is not None:
+        print(f"Результат за всё время с учётом вводов и выводов: {profit:.2f} {currency}")
+    print(f"Портфель Excel: {paths[0].resolve()}")
+    print(f"Портфель JSON: {paths[1].resolve()}")
+    print(f"Дашборд портфеля: {paths[2].resolve()}")
+    if summary.get("cash_flow_error"):
+        print(f"История потоков: {summary['cash_flow_error']}")
+    return paths
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.analyze:
@@ -122,6 +144,10 @@ def main(argv=None):
     else:
         account = choose_account(accounts)
 
+    output_dir = args.output_dir or Path(str(app_cfg.get("output_dir", "exports")))
+    if args.portfolio:
+        return print_portfolio(broker, account, output_dir)
+
     date_from = args.date_from or input("С даты (dd.mm.yy): ").strip()
     date_to = args.date_to or input("По дату (dd.mm.yy): ").strip()
     period_from = parse_day(date_from, tz)
@@ -129,9 +155,10 @@ def main(argv=None):
     if last_day < period_from:
         raise ValueError("Конечная дата раньше начальной.")
     period_to_exclusive = last_day + timedelta(days=1)
+    print_portfolio(broker, account, output_dir)
 
     exporter = ExcelExporter(
-        output_dir=args.output_dir or Path(str(app_cfg.get("output_dir", "exports"))),
+        output_dir=output_dir,
         filename_prefix=str(app_cfg.get("filename_prefix", "trades")),
         extra_columns=bool(excel_cfg.get("extra_columns", False)),
         include_summary_sheet=bool(excel_cfg.get("include_summary_sheet", True)),

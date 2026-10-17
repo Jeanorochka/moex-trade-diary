@@ -10,6 +10,9 @@ import pytest
 from trade_exporter import cli
 from trade_exporter.brokers import finam, registry
 from trade_exporter.domain.models import Account, Fill, Side
+from trade_exporter.domain.portfolio import CashBalance, PortfolioSnapshot
+from trade_exporter.services.portfolio import analyze_portfolio
+from trade_exporter.exporters.portfolio import export_portfolio
 from trade_exporter.exporters.excel import ExcelExporter
 from test_excel_exporter import sample_trade
 
@@ -19,6 +22,12 @@ UTC = timezone.utc
 @pytest.fixture
 def integration(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    def current_portfolio(broker, account, output_dir):
+        snapshot = PortfolioSnapshot(account.id, broker.name, datetime.now(UTC), "RUB", Decimal(100), (CashBalance("RUB", Decimal(100)),), source="synthetic broker")
+        report = analyze_portfolio(snapshot)
+        return report, export_portfolio(report, output_dir)
+
+    monkeypatch.setattr(cli, "execute_portfolio", current_portfolio)
     monkeypatch.setattr(finam.primp, "Client", lambda **kwargs: SimpleNamespace())
     config = tmp_path / "config.toml"
     config.write_text(

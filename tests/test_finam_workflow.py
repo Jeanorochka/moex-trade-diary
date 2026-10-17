@@ -78,8 +78,17 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
                 return response({
                     "account_id": "123", "type": "MC", "status": "ACTIVE",
                     "open_account_date": "2026-09-01T00:00:00Z",
-                    "positions": [{"symbol": "SiZ6@RTSX", "quantity": {"value": "1"}}],
+                    "equity": {"value": "5165"},
+                    "cash": [{"currency_code": "RUB", "units": "5000", "nanos": 0}],
+                    "positions": [
+                        {"symbol": "SiZ6@RTSX", "quantity": {"value": "1"}, "current_price": {"value": "125001"}, "unrealized_pnl": {"value": "55"}},
+                        {"symbol": "SBER@MISX", "quantity": {"value": "1"}, "current_price": {"value": "110"}, "average_price": {"value": "100"}, "current_price_currency": "RUB", "average_price_currency": "RUB", "unrealized_pnl": {"value": "10"}},
+                    ],
                 })
+            if path == "/v1/accounts/123/transactions":
+                return response({"transactions": []})
+            if path == "/v1/accounts/123/orders":
+                return response({"orders": []})
             if path == "/v1/accounts/123/trades":
                 return response({"trades": raw})
             if path == "/v1/assets/SBER@MISX":
@@ -134,6 +143,11 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
     assert future["entry_price"] is None and future["exit_price"] is None
     assert Decimal(future["gross_pnl"]) == 515
     assert "including_open_positions" in payload["futures_basis"]
+    portfolio = orjson.loads(next(tmp_path.glob("portfolio_*.json")).read_bytes())
+    assert Decimal(portfolio["summary"]["equity"]) == 5165
+    assert len(portfolio["positions"]) == 2
+    assert any(row["instrument_id"] == "SBER@MISX" for row in portfolio["positions"])
+    assert next(tmp_path.glob("portfolio_*.html")).exists()
     requests_before_offline = len(calls)
     offline = cli.main(["--analyze", str(path)])
     offline_payload = orjson.loads(offline[1].read_bytes())

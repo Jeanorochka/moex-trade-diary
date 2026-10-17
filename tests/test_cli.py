@@ -43,6 +43,7 @@ def test_export_and_analyze_share_selected_closed_trades(tmp_path, monkeypatch):
             return [make_fill(9, Side.BUY, "100"), make_fill(10, Side.SELL, "110")]
 
     monkeypatch.setattr(cli, "create_broker", lambda *args: Broker())
+    monkeypatch.setattr(cli, "print_portfolio", lambda *args: ())
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     path = cli.main([
@@ -88,3 +89,34 @@ def test_console_entrypoint_does_not_return_paths_as_exit_status(monkeypatch, tm
     monkeypatch.setattr(cli, "main", main)
     assert cli.run() is None
     assert calls == [True]
+
+
+@pytest.mark.parametrize("broker_name", ["finam", "tbank"])
+def test_current_portfolio_does_not_prompt_dates_or_request_closed_trades(broker_name, tmp_path, monkeypatch):
+    account = Account("1", "test", broker_name, opened_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+
+    class Broker:
+        name = broker_name
+
+        def list_accounts(self):
+            return [account]
+
+        def get_fills(self, **kwargs):
+            pytest.fail("current portfolio requested closed trades")
+
+    requests = []
+    expected = (tmp_path / "portfolio.xlsx", tmp_path / "portfolio.json", tmp_path / "portfolio.html")
+    monkeypatch.setattr(cli, "create_broker", lambda *args: Broker())
+    monkeypatch.setattr(cli, "print_portfolio", lambda *args: requests.append(args) or expected)
+    monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("standalone portfolio prompted date"))
+    config = tmp_path / "config.toml"
+    config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
+    result = cli.main(["--config", str(config), "--broker", broker_name, "--account-id", "1", "--portfolio", "--output-dir", str(tmp_path)])
+    assert result == expected
+    assert len(requests) == 1
+    assert requests[0][1] == account
+
+
+def test_current_portfolio_rejects_historical_date_label():
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--portfolio", "--to", "11.09.26"])
