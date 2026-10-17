@@ -88,7 +88,7 @@ def test_year_old_unsold_share_is_valued_from_current_broker_portfolio(broker_na
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     paths = cli.main(["--portfolio", "--broker", broker_name, "--config", str(config), "--account-id", "1", "--output-dir", str(tmp_path)])
     assert all(path.exists() for path in paths)
-    payload = orjson.loads(paths[1].read_bytes())
+    payload = orjson.loads(paths[1].read_bytes())["portfolio"]
     assert Decimal(payload["summary"]["equity"]) == 1500
     assert Decimal(payload["summary"]["cash_base"]) == 300
     assert Decimal(payload["summary"]["unrealized_pnl"]) == 200
@@ -102,5 +102,7 @@ def test_year_old_unsold_share_is_valued_from_current_broker_portfolio(broker_na
     assert Decimal(str(position["unrealized_return"])) == Decimal("0.2")
     workbook = pl.read_excel(paths[0], sheet_name="Позиции")
     assert workbook.height == 1
-    assert "Себестоимость" in paths[2].read_text(encoding="utf-8")
-    assert "1500.00 RUB" in capsys.readouterr().out
+    assert len(paths) == 2
+    assert not list(tmp_path.rglob("*.html"))
+    assert "Лидеры и потери" in pl.read_excel(paths[0], sheet_id=0)
+    assert "Excel:" in capsys.readouterr().out

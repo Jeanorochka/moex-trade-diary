@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -12,14 +13,13 @@ from dotenv import load_dotenv
 from trade_exporter.brokers.registry import available_brokers, create_broker
 from trade_exporter.config import load_config
 from trade_exporter.domain.models import Account
-from trade_exporter.exporters.analytics import export_analysis
+from trade_exporter.exporters.report import export_report
 from trade_exporter.exporters.excel import ExcelExporter
-from trade_exporter.services.analytics import analyze_file, analyze_trades
+from trade_exporter.services.analytics import analyze_file
 from trade_exporter.services.export_service import ExportTradeHistory
 from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.portfolio_service import execute_portfolio, prepare_portfolio_report, save_portfolio_report
-from trade_exporter.services.risk import analyze_result_risk
 from trade_exporter.services.manual_flows import parse_cash_flows
 
 
@@ -138,14 +138,8 @@ def choose_broker(args, cfg):
 
 
 def print_analysis(report, output_dir):
-    workbook, json_path = export_analysis(report, output_dir)
-    win_rate = report.summary["win_rate"]
-    ratio_label = "Доля положительных строк результата" if "event_type" in report.trades.columns else "Win rate"
-    print(f"{ratio_label}: {win_rate:.2%}" if win_rate is not None else f"{ratio_label}: n/a")
-    profit_factor = report.summary["profit_factor"]
-    print(f"Profit factor: {profit_factor:.3f}" if profit_factor is not None else "Profit factor: n/a")
-    print(f"Максимальная просадка: {report.summary['max_drawdown']:.2f}")
-    print(f"Аналитика и графики: {workbook.resolve()}")
+    workbook, json_path = export_report(report, output_dir)
+    print(f"Excel: {workbook.resolve()}")
     print(f"JSON: {json_path.resolve()}")
     return workbook, json_path
 
@@ -154,28 +148,12 @@ def print_portfolio(broker, account, output_dir, *, report=None, **options):
     if report is None:
         report, paths = execute_portfolio(broker, account, output_dir, **options)
     else:
-        paths = save_portfolio_report(report, output_dir, progress=options.get("progress"))
-    summary = report.summary
-    currency = summary["base_currency"]
-    print(f"\nТекущая стоимость портфеля: {summary['equity']:.2f} {currency}")
-    period = summary.get("portfolio_period")
-    if period is not None:
-        if period["status"] == "complete":
-            print(f"Общая прибыль портфеля за период: {period['total_profit']:.2f} {currency}")
-            if period.get("period_return") is not None:
-                print(f"Доходность портфеля за период: {period['period_return']:.2%}")
-        else:
-            print("Общая прибыль портфеля за период не определена: " + " ".join(period.get("quality", ())))
-    unrealized = summary.get("unrealized_pnl")
-    print(f"Открытый результат: {unrealized:.2f} {currency}" if unrealized is not None else "Открытый результат: смотри позиции и полноту оценки в отчёте")
-    profit = summary.get("lifetime_profit")
-    if profit is not None:
-        print(f"Результат за всё время с учётом вводов и выводов: {profit:.2f} {currency}")
-    print(f"Портфель Excel: {paths[0].resolve()}")
-    print(f"Портфель JSON: {paths[1].resolve()}")
-    print(f"Дашборд портфеля: {paths[2].resolve()}")
-    if summary.get("cash_flow_error"):
-        print(f"История потоков: {summary['cash_flow_error']}")
+        paths = save_portfolio_report(
+            report, output_dir, progress=options.get("progress"),
+            source_report_dir=options.get("source_report_dir"),
+        )
+    print(f"Excel: {paths[0].resolve()}")
+    print(f"JSON: {paths[1].resolve()}")
     return paths
 
 
@@ -185,8 +163,6 @@ def main(argv=None, *, progress=None):
     if args.analyze:
         status("Анализ готового файла")
         report = analyze_file(args.analyze, starting_capital=args.starting_capital)
-        print(f"Закрытых строк FIFO: {report.summary['trades']}")
-        print(f"Net P&L: {report.summary['net_pnl']:.2f}")
         return print_analysis(report, args.output_dir or args.analyze.parent / "analytics")
 
     load_dotenv()
@@ -241,7 +217,19 @@ def main(argv=None, *, progress=None):
     capital_started_at = parse_day(args.capital_from, tz) if args.capital_from else period_from
     if capital_started_at != period_from:
         raise ValueError("Для выгрузки сделок стартовый капитал должен относиться к дате --from.")
+    with TemporaryDirectory(prefix="trade_exporter_sources_") as source_dir:
+        return export_selected_period(
+            broker, broker_name, account, args, app_cfg, excel_cfg, tz,
+            output_dir, period_from, period_to_exclusive, capital_started_at,
+            Path(source_dir), progress=progress,
+        )
 
+
+def export_selected_period(
+    broker, broker_name, account, args, app_cfg, excel_cfg, tz, output_dir,
+    period_from, period_to_exclusive, capital_started_at, source_dir, *, progress=None,
+):
+    status = progress or (lambda message: None)
     exporter = ExcelExporter(
         output_dir=output_dir,
         filename_prefix=str(app_cfg.get("filename_prefix", "trades")),
@@ -253,11 +241,12 @@ def main(argv=None, *, progress=None):
         capital_started_at=capital_started_at, result_period_start=period_from,
         result_period_end=period_to_exclusive, progress=progress,
         cash_flow_mode=args.cash_flow_mode, manual_cash_flows=args.manual_cash_flows,
+        source_report_dir=source_dir,
     )
     if broker_name == "finam":
         status("Загрузка исполнений и брокерских отчётов Финама")
         try:
-            path, report, source_reports = execute_finam(
+            _, report, _ = execute_finam(
                 broker=broker,
                 exporter=exporter,
                 account=account,
@@ -268,66 +257,44 @@ def main(argv=None, *, progress=None):
                 reconstruction_mode=str(app_cfg.get("reconstruction_mode", "full")),
                 lookback_days=int(app_cfg.get("lookback_days", 30)),
                 portfolio_report=portfolio_report,
+                write_output=False, source_report_dir=source_dir,
             )
         except Exception:
             if portfolio_report is not None:
                 print("Торговую детализацию выгрузить не удалось. Сохраняю отдельно подготовленную оценку портфеля.")
-                print_portfolio(broker, account, output_dir, report=portfolio_report, progress=progress)
+                print_portfolio(broker, account, output_dir, report=portfolio_report, progress=progress, source_report_dir=source_dir)
             raise
-        print("\nГотово.")
-        print("Результат: закрытия акций FIFO и начисленная ВМ фьючерсов, включая открытые позиции.")
-        for reason in (*report.summary.get("result_quality", ()), *report.summary.get("commission_quality", ())):
-            print(f"Качество расчёта: {reason}")
-        print(f"Валовой результат закрытий и ВМ: {report.summary['gross_pnl']:.2f}")
-        print(f"Учтённые торговые расходы: {report.summary['commission']:.2f}")
-        print(f"Результат закрытий и ВМ после расходов: {report.summary['net_pnl']:.2f}")
-        print(f"Excel: {path.resolve()}")
-        status("Расчёт финансовых показателей за выбранный период")
-        if "risk" not in report.summary:
-            report.summary["risk"] = analyze_result_risk(
-                report.daily, args.starting_capital, period_from, period_to_exclusive,
-            )
-        print_analysis(report, path.parent)
-        print_portfolio(
-            broker, account, output_dir, report=portfolio_report, progress=progress,
+    else:
+        status("Загрузка и сопоставление сделок Т-Банка")
+        use_case = ExportTradeHistory(
+            broker=broker,
+            matcher=FifoMatcher(),
+            exporter=exporter,
+            reconstruction_mode=str(app_cfg.get("reconstruction_mode", "full")),
+            lookback_days=int(app_cfg.get("lookback_days", 30)),
+            display_timezone=tz,
+            starting_capital=args.starting_capital,
+            portfolio_report=portfolio_report,
         )
-        if source_reports:
-            print(f"Исходные отчёты ({len(source_reports)}): {source_reports[0].parent.resolve()}")
-        status("Выгрузка завершена")
-        return path
-    status("Загрузка и сопоставление сделок Т-Банка")
-    use_case = ExportTradeHistory(
-        broker=broker,
-        matcher=FifoMatcher(),
-        exporter=exporter,
-        reconstruction_mode=str(app_cfg.get("reconstruction_mode", "full")),
-        lookback_days=int(app_cfg.get("lookback_days", 30)),
-        display_timezone=tz,
-        starting_capital=args.starting_capital,
-        portfolio_report=portfolio_report,
+        try:
+            use_case.execute(account, period_from, period_to_exclusive, write_output=False)
+        except Exception:
+            if portfolio_report is not None:
+                print("Торговую детализацию выгрузить не удалось. Сохраняю подготовленную оценку портфеля.")
+                print_portfolio(broker, account, output_dir, report=portfolio_report, progress=progress, source_report_dir=source_dir)
+            raise
+        report = use_case.analysis_report
+    status("Сохранение Excel с аналитикой и лидерами сделок")
+    details = dict(report.details)
+    details["source_reports"] = sorted(set(details.get("source_reports", ())) | {
+        path for path in source_dir.rglob("*") if path.is_file()
+    })
+    path, json_path = export_report(
+        report, output_dir, portfolio_report=portfolio_report,
+        prefix=f"report_{broker_name}", details=details,
     )
-    try:
-        path, trades = use_case.execute(account, period_from, period_to_exclusive)
-    except Exception:
-        if portfolio_report is not None:
-            print("Торговую детализацию выгрузить не удалось. Сохраняю отдельно подготовленную оценку портфеля.")
-            print_portfolio(broker, account, output_dir, report=portfolio_report, progress=progress)
-        raise
-
-    gross = sum((t.gross_pnl for t in trades), start=Decimal("0"))
-    commission = sum((t.commission for t in trades), start=Decimal("0"))
-    print("\nГотово.")
-    print(f"Закрытых строк: {len(trades)}")
-    print(f"Gross P&L: {gross:.2f}")
-    print(f"Комиссии: {commission:.2f}")
-    print(f"Результат закрытых сделок после расходов: {(gross - commission):.2f}")
     print(f"Excel: {path.resolve()}")
-    report = use_case.analysis_report
-    if args.analytics:
-        print_analysis(report, path.parent)
-    print_portfolio(
-        broker, account, output_dir, report=portfolio_report, progress=progress,
-    )
+    print(f"JSON: {json_path.resolve()}")
     status("Выгрузка завершена")
     return path
 

@@ -101,7 +101,8 @@ def test_manual_journal_survives_excel_json_and_offline_analysis(tmp_path, monke
     paths = service.save_portfolio_report(portfolio, tmp_path)
     data = orjson.loads(paths[1].read_bytes())
     assert data["summary"]["portfolio_period"]["cash_flow_mode"] == "manual"
-    assert data["period_flows"]
+    assert data["portfolio"]["period_flows"]
+    assert analyze_file(paths[0]).summary["trading_history_loaded"] is False
     first = pl.read_excel(paths[0], sheet_name="Портфель за период")
     assert any("ручн" in str(value).lower() for value in first["основание"])
     trading = analyze_results(pl.DataFrame({

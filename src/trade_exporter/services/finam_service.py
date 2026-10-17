@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
@@ -105,7 +106,7 @@ def _fee_events(broker, account, start, end, display_timezone) -> tuple[list[dic
         rows.append({
             "дата": flow.timestamp.astimezone(display_timezone).date(),
             "время": flow.timestamp.isoformat(),
-            "сумма": float(flow.amount),
+            "сумма": flow.amount,
             "валюта": flow.currency,
             "идентификатор операции": flow.id,
         })
@@ -208,7 +209,9 @@ def execute_finam(
     reconstruction_mode: str = "full",
     lookback_days: int = 30,
     portfolio_report=None,
-) -> tuple[Path, AnalysisReport, list[Path]]:
+    write_output: bool = True,
+    source_report_dir: str | Path | None = None,
+) -> tuple[Path | None, AnalysisReport, list[Path]]:
     if isinstance(display_timezone, str):
         display_timezone = ZoneInfo(display_timezone)
     if period_from.tzinfo is None or period_to_exclusive.tzinfo is None:
@@ -327,7 +330,7 @@ def execute_finam(
             raise ValueError("Finam: результат фьючерсов по отчётам доступен за полные календарные дни")
         baseline = datetime.combine(local_start.date() - timedelta(days=1), time(), timezone.utc)
         report_end = datetime.combine(local_end.date(), time(), timezone.utc)
-        downloader = FinamReports(broker, exporter.output_dir)
+        downloader = FinamReports(broker, source_report_dir if source_report_dir is not None else exporter.output_dir)
         report_paths = downloader.download(account.id, baseline, report_end, chunk_days=1)
         margins = parse_finam_margins(report_paths, report_dates=downloader.report_dates)
         future_assets = {symbol: asset for symbol, asset in assets.items() if _future(asset)}
@@ -390,6 +393,34 @@ def execute_finam(
     attach_portfolio_performance(report, portfolio_report)
     risk = report.summary["risk"]
     portfolio_period = report.summary.get("portfolio_period")
+    margin_frame = pl.DataFrame(margin_rows) if margin_rows else pl.DataFrame(schema={
+        "date": pl.Date, "ticker": pl.String, "gross_pnl": pl.Decimal(38, 18),
+        "currency": pl.String, "source_id": pl.String, "source_file": pl.String,
+    })
+    closed_frame = _closed_rows(closed, display_timezone, allocated_fees=not transaction_fees)
+    execution_frame = pl.DataFrame(execution_rows, schema=EXECUTION_SCHEMA)
+    fee_frame = pl.DataFrame(fee_rows, schema={
+        "дата": pl.Date, "время": pl.String, "сумма": pl.Decimal(38, 18),
+        "валюта": pl.String, "идентификатор операции": pl.String,
+    })
+    report.details.update({
+        "executions": execution_frame,
+        "raw_executions": [
+            trade for trade in raw
+            if period_from <= broker._timestamp(trade.get("timestamp")) < period_to_exclusive
+        ],
+        "closed_trades": closed_frame,
+        "closed_records": [{
+            **asdict(trade),
+            "commission": trade.commission if not transaction_fees else None,
+            "net_pnl": trade.net_pnl if not transaction_fees else None,
+        } for trade in closed],
+        "futures_margin": margin_frame,
+        "broker_fees": fee_frame,
+        "source_reports": list(report_paths),
+    })
+    if not write_output:
+        return None, report, report_paths
     if not has_futures and not transaction_fees and not execution_quality and not result_quality:
         options = {"risk": risk}
         if portfolio_period is not None:
@@ -403,10 +434,6 @@ def execute_finam(
     path = exporter._new_file_path(
         broker.name, account.id, period_from, period_to_exclusive - timedelta(microseconds=1),
     )
-    margin_frame = pl.DataFrame(margin_rows) if margin_rows else pl.DataFrame(schema={
-        "date": pl.Date, "ticker": pl.String, "gross_pnl": pl.Decimal(38, 18),
-        "currency": pl.String, "source_id": pl.String, "source_file": pl.String,
-    })
     basis_rows = [
         ("Акции", "Валовой реализованный FIFO P&L закрытых сделок." if transaction_fees else "Реализованный FIFO P&L закрытых сделок после комиссий."),
         ("Фьючерсы", "Вариационная маржа, включая открытые позиции: оплаченная плюс изменение неоплаченной; комиссии учтены отдельно."),
@@ -433,8 +460,8 @@ def execute_finam(
     if result_quality:
         result_frame = result_frame.with_columns(pl.lit("частичный; неподдержанные инструменты исключены").alias("полнота результата"))
     sheets = {
-        "Сделки": _closed_rows(closed, display_timezone, allocated_fees=not transaction_fees),
-        "Исполнения ФИНАМ": pl.DataFrame(execution_rows, schema=EXECUTION_SCHEMA),
+        "Сделки": closed_frame,
+        "Исполнения ФИНАМ": execution_frame,
         "Фьючерсы": _display(margin_frame),
         "Торговый результат": _display(report.daily),
         "Результаты": result_frame,
@@ -442,10 +469,7 @@ def execute_finam(
         "Параметры расчёта": analysis_metadata(report.summary),
     }
     if transaction_fees:
-        sheets["Денежные комиссии"] = pl.DataFrame(fee_rows, schema={
-            "дата": pl.Date, "время": pl.String, "сумма": pl.Float64,
-            "валюта": pl.String, "идентификатор операции": pl.String,
-        })
+        sheets["Денежные комиссии"] = _display(fee_frame)
     sheets["Риск и доходность"] = risk_sheet(risk)
     sheet_options = {"Риск и доходность": risk_sheet_options(risk)}
     if portfolio_period is not None:

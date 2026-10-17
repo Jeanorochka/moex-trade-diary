@@ -62,7 +62,7 @@ HEADERS = {
 
 def analysis_metadata(summary: dict) -> pl.DataFrame:
     rows = []
-    for key in ("commission_complete", "commission_basis", "commission_quality", "net_pnl_basis", "synthetic_trade_ids", "execution_quality", "result_complete", "result_quality", "excluded_instruments", "portfolio_period", "risk"):
+    for key in ("base_currency", "trading_history_loaded", "commission_complete", "commission_basis", "commission_quality", "net_pnl_basis", "synthetic_trade_ids", "execution_quality", "result_complete", "result_quality", "excluded_instruments", "portfolio_period", "risk"):
         if key not in summary:
             continue
         value = orjson.dumps(summary[key], default=_json_default).decode()

@@ -15,7 +15,7 @@ import polars as pl
 
 from trade_exporter.brokers.portfolio import CashFlowHistory, load_cash_flows, load_portfolio
 from trade_exporter.domain.portfolio import CashFlow, PortfolioSnapshot
-from trade_exporter.exporters.portfolio import export_portfolio
+from trade_exporter.exporters.report import export_report
 from trade_exporter.services.portfolio import analyze_portfolio, normalize_cash_flows
 from trade_exporter.services.risk import analyze_portfolio_risk
 from trade_exporter.services.performance import validate_portfolio_period
@@ -165,7 +165,7 @@ def prepare_portfolio_report(
     broker, account, output_dir: Path, *, captured_at=None,
     starting_capital=Decimal(0), capital_started_at=None, results=None,
     result_period_start=None, result_period_end=None, results_quality=(), progress=None,
-    cash_flow_mode="auto", manual_cash_flows=(),
+    cash_flow_mode="auto", manual_cash_flows=(), source_report_dir=None,
 ):
     if cash_flow_mode not in {"auto", "manual"}:
         raise ValueError("Неизвестный источник внешних движений")
@@ -245,11 +245,14 @@ def prepare_portfolio_report(
             from trade_exporter.services.historical_valuation import load_historical_valuation
 
             status("Получение исторической стоимости портфеля на конец периода")
-            valuation = load_historical_valuation(broker, account, (broker_end - timedelta(microseconds=1)).date(), output_dir)
+            valuation = load_historical_valuation(
+                broker, account, (broker_end - timedelta(microseconds=1)).date(),
+                source_report_dir if source_report_dir is not None else output_dir,
+            )
             if valuation.currency != snapshot.base_currency:
                 raise RuntimeError("Историческая оценка выражена в другой валюте")
             ending_equity = valuation.equity
-            valuation_source = str(valuation.source_file)
+            valuation_source = valuation.source_file.name if source_report_dir is not None else str(valuation.source_file)
             valuation_basis = "historical_broker_report"
             valuation_quality.extend(valuation.quality)
         except (RuntimeError, ValueError) as error:
@@ -349,14 +352,28 @@ def prepare_portfolio_report(
     return report
 
 
-def save_portfolio_report(report, output_dir: Path, *, progress=None):
-    (progress or (lambda message: None))("Сохранение портфеля, финансовых показателей и графиков")
+def save_portfolio_report(report, output_dir: Path, *, progress=None, source_report_dir=None):
+    from trade_exporter.services.analytics import analyze_trades
+    from trade_exporter.services.performance import attach_portfolio_performance
+
+    (progress or (lambda message: None))("Сохранение Excel с портфелем и финансовыми показателями")
     summary = report.summary
     prefix = f"portfolio_{summary['broker']}_{sha256(summary['account_id'].encode()).hexdigest()[:8]}"
-    return export_portfolio(report, output_dir, prefix=prefix)
+    analysis = analyze_trades([], timezone.utc)
+    analysis.summary["trading_history_loaded"] = False
+    attach_portfolio_performance(analysis, report)
+    details = {"source_reports": sorted(path for path in Path(source_report_dir).rglob("*") if path.is_file())} if source_report_dir is not None else {}
+    return export_report(analysis, output_dir, prefix=prefix, portfolio_report=report, details=details)
 
 
 def execute_portfolio(broker, account, output_dir: Path, **options):
-    report = prepare_portfolio_report(broker, account, output_dir, **options)
-    paths = save_portfolio_report(report, output_dir, progress=options.get("progress"))
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory(prefix="trade_exporter_sources_") as source_dir:
+        options.setdefault("source_report_dir", Path(source_dir))
+        report = prepare_portfolio_report(broker, account, output_dir, **options)
+        paths = save_portfolio_report(
+            report, output_dir, progress=options.get("progress"),
+            source_report_dir=options["source_report_dir"],
+        )
     return report, paths

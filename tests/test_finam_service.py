@@ -125,6 +125,68 @@ def test_stock_only_fifo_handles_partial_closes_without_requesting_reports(repor
     assert broker.load_calls == [("123", ACCOUNT.opened_at, END)]
 
 
+def test_deferred_stock_report_preserves_partial_close_quantity_without_output(reports, tmp_path, monkeypatch):
+    broker = Broker([
+        execution("buy", "SBER@MISX", "SIDE_BUY", 100, 10, 1, "2025-12-31T12:00:00Z"),
+        execution("sell", "SBER@MISX", "SIDE_SELL", 110, 4, "0.4", "2026-01-01T12:00:00Z"),
+    ])
+    exporter = ExcelExporter(tmp_path / "diary")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Deferred preparation must not create a diary workbook")
+
+    monkeypatch.setattr(exporter, "export", fail)
+    monkeypatch.setattr(exporter, "_new_file_path", fail)
+    monkeypatch.setattr(finam_service, "write_workbook", fail)
+    portfolio = SimpleNamespace(summary={
+        "portfolio_period": {"status": "unavailable", "base_currency": "RUB", "quality": ["synthetic"]},
+    })
+    path, report, sources = execute_finam(
+        broker, exporter, ACCOUNT, START, END, UTC, portfolio_report=portfolio, write_output=False,
+    )
+    assert path is None
+    assert sources == reports.calls == []
+    assert not exporter.output_dir.exists()
+    assert report.summary["net_pnl"] == Decimal("39.2")
+    assert report.summary["headline_basis"] == "portfolio_period"
+    assert portfolio.summary["trading_result"]["net_pnl"] == Decimal("39.2")
+    assert report.details["closed_trades"]["количество"].to_list() == [4]
+    assert report.details["closed_records"][0]["quantity"] == 4
+    assert report.details["closed_records"][0]["commission"] == Decimal("0.8")
+    assert report.details["executions"]["идентификатор сделки"].to_list() == ["sell"]
+    assert [row["trade_id"] for row in report.details["raw_executions"]] == ["sell"]
+    assert report.details["futures_margin"].is_empty()
+    assert report.details["broker_fees"].is_empty()
+
+
+def test_deferred_future_report_preserves_sources_in_requested_input_directory(reports, tmp_path, monkeypatch):
+    reports.margins = [margin(date(2026, 1, 1), "75")]
+    broker = Broker([
+        execution("buy", "SiZ6@RTSX", "SIDE_BUY", 100000, 1, 1, "2025-12-31T12:00:00Z"),
+        execution("sell", "SiZ6@RTSX", "SIDE_SELL", 100100, 1, 2, "2026-01-01T12:00:00Z"),
+    ])
+    exporter = ExcelExporter(tmp_path / "diary")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Deferred preparation must not create a diary workbook")
+
+    monkeypatch.setattr(exporter, "_new_file_path", fail)
+    monkeypatch.setattr(finam_service, "write_workbook", fail)
+    source_dir = tmp_path / "inputs"
+    path, report, sources = execute_finam(
+        broker, exporter, ACCOUNT, START, END, UTC, write_output=False, source_report_dir=source_dir,
+    )
+    assert path is None
+    assert not exporter.output_dir.exists()
+    assert report.summary["net_pnl"] == Decimal("73")
+    assert report.details["source_reports"] == sources
+    assert len(sources) == 3
+    assert all(source.parent == source_dir and source.is_file() for source in sources)
+    assert all(source.read_bytes() == b"raw original broker report" for source in sources)
+    assert report.details["futures_margin"]["gross_pnl"].to_list() == ["75"]
+    assert report.details["closed_trades"].is_empty()
+
+
 def test_whole_portfolio_combines_stock_fifo_and_report_vm_with_actual_futures_fees(reports, tmp_path):
     reports.margins = [
         margin(date(2025, 12, 31), 999999),
@@ -334,6 +396,27 @@ def test_missing_trade_commissions_use_period_cash_expenses_without_fabricating_
     assert offline.summary["net_pnl"] == Decimal("97.5")
     assert offline.summary["commission_complete"] is True
     assert offline.summary["commission_basis"] == "transactions_period"
+
+
+def test_deferred_cash_fee_report_keeps_exact_cost_and_unknown_per_trade_fees(reports, tmp_path, monkeypatch):
+    broker = Broker([
+        without_fee(execution("buy", "SBER@MISX", "SIDE_BUY", 100, 1, 1, "2025-12-31T12:00:00Z")),
+        without_fee(execution("sell", "SBER@MISX", "SIDE_SELL", 110, 1, 1, "2026-01-01T12:00:00Z")),
+    ])
+    fee = Decimal("-2.500000000000000001")
+    fee_history(monkeypatch, [CashFlow(START, fee, "RUB", "fee", "fee")])
+    exporter = ExcelExporter(tmp_path / "diary")
+    path, report, sources = execute_finam(
+        broker, exporter, ACCOUNT, START, END, UTC, write_output=False,
+    )
+    assert path is None
+    assert sources == []
+    assert not exporter.output_dir.exists()
+    assert report.summary["net_pnl"] == Decimal("7.499999999999999999")
+    assert report.details["broker_fees"]["сумма"].to_list() == [fee]
+    assert report.details["closed_trades"]["комиссия"].to_list() == [None]
+    assert report.details["closed_records"][0]["commission"] is None
+    assert report.details["closed_records"][0]["net_pnl"] is None
 
 
 def test_one_missing_historical_commission_switches_all_fees_to_cash_basis(reports, tmp_path, monkeypatch):

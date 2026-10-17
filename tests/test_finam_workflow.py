@@ -129,13 +129,18 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
         datetime(2026, 9, 10, tzinfo=timezone.utc).date(),
         datetime(2026, 9, 11, tzinfo=timezone.utc).date(),
     }
-    sources = list((tmp_path / "broker_reports").iterdir())
+    payload = orjson.loads(path.with_suffix(".json").read_bytes())
+    sources = payload["details"]["source_reports"]
     assert len(sources) == 2
-    assert all(source.read_bytes().startswith(b"<!doctype html>") for source in sources)
+    assert all(source["content"].startswith("<!doctype html>") for source in sources)
+    assert not list(tmp_path.rglob("*.html"))
+    assert list(tmp_path.glob("*.xlsx")) == [path]
+    assert list(tmp_path.glob("*.json")) == [path.with_suffix(".json")]
     workbook = pl.read_excel(path, sheet_id=0)
-    assert workbook["Исполнения ФИНАМ"].height == 2
-    assert workbook["Сделки"]["финрез net"].sum() == 8
-    payload = orjson.loads(next(tmp_path.glob("analytics_*.json")).read_bytes())
+    assert "Лидеры и потери" in workbook
+    assert len(workbook) <= 7
+    assert len(payload["details"]["raw_executions"]) == 2
+    assert Decimal(payload["details"]["closed_records"][0]["net_pnl"]) == 8
     assert Decimal(payload["summary"]["gross_pnl"]) == 525
     assert Decimal(payload["summary"]["commission"]) == 5
     assert Decimal(payload["summary"]["net_pnl"]) == 520
@@ -143,11 +148,10 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
     assert future["entry_price"] is None and future["exit_price"] is None
     assert Decimal(future["gross_pnl"]) == 515
     assert "including_open_positions" in payload["futures_basis"]
-    portfolio = orjson.loads(next(tmp_path.glob("portfolio_*.json")).read_bytes())
+    portfolio = payload["portfolio"]
     assert Decimal(portfolio["summary"]["equity"]) == 5165
     assert len(portfolio["positions"]) == 2
     assert any(row["instrument_id"] == "SBER@MISX" for row in portfolio["positions"])
-    assert next(tmp_path.glob("portfolio_*.html")).exists()
     requests_before_offline = len(calls)
     offline = cli.main(["--analyze", str(path)])
     offline_payload = orjson.loads(offline[1].read_bytes())
@@ -155,4 +159,4 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
     assert len(calls) == requests_before_offline
     stdout = capsys.readouterr().out
     assert token not in stdout and jwt not in stdout
-    assert "включая открытые позиции" in stdout
+    assert "Excel:" in stdout

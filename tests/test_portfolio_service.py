@@ -132,6 +132,10 @@ def test_snapshot_pipeline_keeps_current_report_when_flow_history_is_unavailable
     monkeypatch.setattr(service, "load_cash_flows", unavailable)
     report, paths = service.execute_portfolio(object(), account, tmp_path)
     assert all(path.exists() for path in paths)
+    assert len(paths) == 2
+    assert list(tmp_path.glob("*.xlsx")) == [paths[0]]
+    assert list(tmp_path.glob("*.json")) == [paths[1]]
+    assert not list(tmp_path.rglob("*.html"))
     assert report.summary["equity"] == 120
     assert report.summary["lifetime_profit"] is None
     assert report.summary["cash_flow_error"] == "T-Bank API: unavailable"
@@ -159,7 +163,7 @@ def test_snapshot_pipeline_excludes_deposit_between_observed_values(tmp_path, mo
     report, paths = service.execute_portfolio(object(), account, tmp_path)
     payload = orjson.loads(paths[1].read_bytes())
     assert report.summary["observed_period"]["profit"] == 30
-    assert Decimal(payload["summary"]["observed_period"]["modified_dietz_return"]) == Decimal("0.2")
+    assert Decimal(payload["portfolio"]["summary"]["observed_period"]["modified_dietz_return"]) == Decimal("0.2")
 
 
 def test_observed_returns_work_even_when_broker_hides_original_funding(tmp_path, monkeypatch):

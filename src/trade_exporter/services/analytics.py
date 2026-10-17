@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from pathlib import Path
@@ -42,6 +42,7 @@ class AnalysisReport:
     daily: pl.DataFrame
     monthly: pl.DataFrame
     by_ticker: pl.DataFrame
+    details: dict = field(default_factory=dict)
 
 
 def _money(value, row: int, column: str, *, round_excess: bool = False) -> Decimal:
@@ -350,6 +351,7 @@ def analyze_file(
             raise ValueError("требуются колонки ключ и значение")
         metadata = {}
         types = {
+            "trading_history_loaded": bool, "base_currency": str,
             "commission_complete": bool, "commission_basis": str,
             "commission_quality": list, "net_pnl_basis": str,
             "synthetic_trade_ids": int, "execution_quality": list,

@@ -74,7 +74,7 @@ def test_deposit_is_removed_and_period_ledger_is_exported(tmp_path, monkeypatch)
     assert portfolio.period_flows["id"].to_list() == ["deposit"]
     paths = service.save_portfolio_report(portfolio, tmp_path)
     payload = orjson.loads(paths[1].read_bytes())
-    assert payload["period_flows"][0]["amount"] == "100.000000000000000000"
+    assert payload["portfolio"]["period_flows"][0]["amount"] == "100.000000000000000000"
     assert "Потоки периода" in pl.read_excel(paths[0], sheet_id=0)
 
 
