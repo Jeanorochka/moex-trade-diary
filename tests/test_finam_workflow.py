@@ -116,7 +116,7 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
     monkeypatch.setattr(finam.primp, "Client", Client)
     monkeypatch.setattr(finam.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setenv("FINAM_API_TOKEN", token)
+    monkeypatch.setenv("F.INVEST_TOKEN", token)
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     path = cli.main([

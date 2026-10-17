@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -20,11 +21,15 @@ from trade_exporter.services.matcher import FifoMatcher
 from trade_exporter.services.portfolio_service import execute_portfolio
 
 
+TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
+BROKER_NAMES = {"finam": "Финам", "tbank": "Т-Банк"}
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Выгрузка сделок и аналитика дневника")
     parser.add_argument("--config", default="config.toml")
     parser.add_argument("--broker", choices=available_brokers())
-    parser.add_argument("--token", help="API-токен Финама; по умолчанию из FINAM_API_TOKEN")
+    parser.add_argument("--token", help="API-токен Финама; по умолчанию из F.INVEST_TOKEN")
     parser.add_argument("--account-id")
     parser.add_argument("--from", dest="date_from", help="dd.mm.yy")
     parser.add_argument("--to", dest="date_to", help="dd.mm.yy")
@@ -82,6 +87,41 @@ def choose_account(accounts: list[Account]) -> Account:
         print("Нужен номер счета из списка.")
 
 
+def choose_broker(args, cfg):
+    configured = str(cfg.get("app", {}).get("broker", "auto")).strip().lower()
+    selected = args.broker or configured
+    if selected != "auto":
+        if selected not in available_brokers():
+            raise ValueError("В app.broker укажи auto, finam или tbank.")
+        return selected
+    if args.token is not None:
+        return "finam"
+    candidates = []
+    for name in available_brokers():
+        settings = cfg.get(name, {})
+        token_env = str(settings.get("token_env", TOKEN_ENVS[name]))
+        token = settings.get("token") if name == "finam" else None
+        if str(token or os.getenv(token_env, "")).strip():
+            candidates.append(name)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError("Не найден токен. Заполни F.INVEST_TOKEN для Финама или T.INVEST_TOKEN для Т-Банка в корневом .env.")
+    print("\nНайдены токены двух брокеров:")
+    for index, name in enumerate(candidates, 1):
+        print(f"{index}. {BROKER_NAMES[name]}")
+    while True:
+        try:
+            answer = input("Выбери брокера: ").strip().lower()
+        except (EOFError, OSError) as error:
+            raise RuntimeError("Найдены оба токена. Укажи --broker finam или --broker tbank.") from error
+        if answer in candidates:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
+            return candidates[int(answer) - 1]
+        print("Нужен номер брокера из списка.")
+
+
 def print_analysis(report, output_dir):
     workbook, json_path = export_analysis(report, output_dir)
     win_rate = report.summary["win_rate"]
@@ -126,12 +166,13 @@ def main(argv=None):
     app_cfg = cfg.get("app", {})
     excel_cfg = cfg.get("excel", {})
 
-    broker_name = (args.broker or app_cfg.get("broker", "tbank")).lower()
+    broker_name = choose_broker(args, cfg)
     broker_settings = dict(cfg.get(broker_name, {}))
     if args.token is not None:
         if broker_name != "finam":
             raise ValueError("--token используется с --broker finam.")
         broker_settings["token"] = args.token
+    print(f"Брокер: {BROKER_NAMES[broker_name]}")
     broker = create_broker(broker_name, broker_settings)
     tz = ZoneInfo(str(app_cfg.get("timezone", "Europe/Moscow")))
 

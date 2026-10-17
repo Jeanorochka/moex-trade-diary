@@ -50,7 +50,7 @@ class TBankBroker(BrokerAdapter):
             settings.get("normalize_futures_to_points", True)
         )
 
-        token_env = str(settings.get("token_env", "TBANK_INVEST_TOKEN"))
+        token_env = str(settings.get("token_env", "T.INVEST_TOKEN"))
         self.token = os.getenv(token_env, "").strip()
         if not self.token:
             raise RuntimeError(

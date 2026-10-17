@@ -41,6 +41,8 @@ def http(monkeypatch):
             return self._call("GET", url, options)
 
     monkeypatch.setattr(finam.primp, "Client", Client)
+    monkeypatch.delenv("F.INVEST_TOKEN", raising=False)
+    monkeypatch.delenv("T.INVEST_TOKEN", raising=False)
     monkeypatch.delenv("FINAM_API_TOKEN", raising=False)
     monkeypatch.delenv("FINAM_TOKEN", raising=False)
     return state
@@ -85,7 +87,7 @@ def history_broker(monkeypatch, trades=None, asset=None, settings=None):
 
 
 def test_constructor_is_network_free_and_uses_direct_token_before_environment(http, monkeypatch):
-    monkeypatch.setenv("FINAM_API_TOKEN", "environment")
+    monkeypatch.setenv("F.INVEST_TOKEN", "environment")
     broker = FinamBroker({"token": "  direct  ", "request_timeout_seconds": 17})
     assert broker.token == "direct"
     assert http.calls == []
@@ -94,14 +96,39 @@ def test_constructor_is_network_free_and_uses_direct_token_before_environment(ht
         "timeout": 17,
         "verify": False,
     }
-    assert finam.os.environ["FINAM_API_TOKEN"] == "environment"
+    assert finam.os.environ["F.INVEST_TOKEN"] == "environment"
 
 
-def test_default_environment_fallback_and_custom_environment_are_supported(http, monkeypatch):
-    monkeypatch.setenv("FINAM_TOKEN", " fallback ")
-    assert FinamBroker({}).token == "fallback"
+def test_default_prefixed_environment_is_isolated_and_trimmed(http, monkeypatch):
+    monkeypatch.setenv("F.INVEST_TOKEN", " finam-token ")
+    monkeypatch.setenv("T.INVEST_TOKEN", "tbank-token")
+    monkeypatch.setenv("INVEST_TOKEN", "shared-token")
+    monkeypatch.setenv("FINAM_API_TOKEN", "legacy-token")
+    monkeypatch.setenv("FINAM_TOKEN", "older-token")
+    assert FinamBroker({}).token == "finam-token"
+    assert http.calls == []
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_missing_prefixed_token_never_falls_back_to_other_broker_or_legacy_keys(http, monkeypatch, value):
+    if value is not None:
+        monkeypatch.setenv("F.INVEST_TOKEN", value)
+    monkeypatch.setenv("T.INVEST_TOKEN", "tbank-token")
+    monkeypatch.setenv("INVEST_TOKEN", "shared-token")
+    monkeypatch.setenv("FINAM_API_TOKEN", "legacy-token")
+    monkeypatch.setenv("FINAM_TOKEN", "older-token")
+    with pytest.raises(RuntimeError, match=r"F\.INVEST_TOKEN"):
+        FinamBroker({})
+    assert http.calls == []
+    assert http.options is None
+
+
+def test_explicit_custom_or_legacy_environment_overrides_prefixed_default(http, monkeypatch):
+    monkeypatch.setenv("F.INVEST_TOKEN", "default-token")
     monkeypatch.setenv("CUSTOM_FINAM", " custom ")
     assert FinamBroker({"token_env": "CUSTOM_FINAM"}).token == "custom"
+    monkeypatch.setenv("FINAM_API_TOKEN", " explicit-legacy ")
+    assert FinamBroker({"token_env": "FINAM_API_TOKEN"}).token == "explicit-legacy"
     with pytest.raises(RuntimeError, match="MISSING_FINAM"):
         FinamBroker({"token_env": "MISSING_FINAM"})
 

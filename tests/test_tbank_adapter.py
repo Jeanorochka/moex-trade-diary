@@ -121,6 +121,45 @@ def test_http_client_preserves_auth_timeout_and_certificate_setting(http_broker)
     }
 
 
+def test_default_prefixed_environment_is_isolated_and_trimmed(http_broker, monkeypatch):
+    _, state = http_broker
+    monkeypatch.setenv("T.INVEST_TOKEN", " tbank-token ")
+    monkeypatch.setenv("F.INVEST_TOKEN", "finam-token")
+    monkeypatch.setenv("INVEST_TOKEN", "shared-token")
+    monkeypatch.setenv("TBANK_INVEST_TOKEN", "legacy-token")
+    broker = TBankBroker({})
+    assert broker.token == "tbank-token"
+    assert state.options["headers"]["Authorization"] == "Bearer tbank-token"
+    assert state.calls == []
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_missing_prefixed_token_never_uses_finam_or_legacy_keys(http_broker, monkeypatch, value):
+    _, state = http_broker
+    monkeypatch.delenv("T.INVEST_TOKEN", raising=False)
+    if value is not None:
+        monkeypatch.setenv("T.INVEST_TOKEN", value)
+    monkeypatch.setenv("F.INVEST_TOKEN", "finam-token")
+    monkeypatch.setenv("INVEST_TOKEN", "shared-token")
+    monkeypatch.setenv("TBANK_INVEST_TOKEN", "legacy-token")
+    state.options = None
+    with pytest.raises(RuntimeError, match=r"T\.INVEST_TOKEN"):
+        TBankBroker({})
+    assert state.options is None
+    assert state.calls == []
+
+
+@pytest.mark.parametrize("key", ["CUSTOM_TBANK", "TBANK_INVEST_TOKEN"])
+def test_explicit_custom_or_legacy_environment_overrides_prefixed_default(http_broker, monkeypatch, key):
+    _, state = http_broker
+    monkeypatch.setenv("T.INVEST_TOKEN", "default-token")
+    monkeypatch.setenv(key, " explicit-token ")
+    broker = TBankBroker({"token_env": key})
+    assert broker.token == "explicit-token"
+    assert state.options["headers"]["Authorization"] == "Bearer explicit-token"
+    assert state.calls == []
+
+
 @pytest.mark.parametrize("status_code", [200, 201, 302])
 def test_post_sends_json_to_endpoint_and_returns_decoded_response(
     http_broker, status_code

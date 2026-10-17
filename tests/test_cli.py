@@ -47,7 +47,7 @@ def test_export_and_analyze_share_selected_closed_trades(tmp_path, monkeypatch):
     config = tmp_path / "config.toml"
     config.write_text('[app]\ntimezone = "UTC"\n', encoding="utf-8")
     path = cli.main([
-        "--config", str(config), "--account-id", "1",
+        "--config", str(config), "--broker", "tbank", "--account-id", "1",
         "--from", "11.09.26", "--to", "11.09.26",
         "--output-dir", str(tmp_path), "--analytics",
     ])

@@ -97,7 +97,7 @@ def integration(tmp_path, monkeypatch):
 def test_finam_env_token_selects_account_and_exports_analytics_by_default(
     integration, tmp_path, monkeypatch, capsys
 ):
-    monkeypatch.setenv("FINAM_API_TOKEN", "test-env-secret")
+    monkeypatch.setenv("F.INVEST_TOKEN", "test-env-secret")
     monkeypatch.setattr("builtins.input", lambda prompt: "2")
     path = cli.main(integration.arguments)
     assert path.exists()
@@ -119,17 +119,17 @@ def test_finam_env_token_selects_account_and_exports_analytics_by_default(
 def test_finam_cli_token_overrides_environment_without_mutating_it(
     integration, monkeypatch
 ):
-    monkeypatch.setenv("FINAM_API_TOKEN", "old-env-secret")
+    monkeypatch.setenv("F.INVEST_TOKEN", "old-env-secret")
     path = cli.main(integration.arguments + [
         "--account-id", "selected-account", "--token", "test-cli-secret",
     ])
     assert path.exists()
     assert integration.created[0].token == "test-cli-secret"
-    assert os.environ["FINAM_API_TOKEN"] == "old-env-secret"
+    assert os.environ["F.INVEST_TOKEN"] == "old-env-secret"
 
 
 def test_finam_cli_token_works_without_environment(integration, monkeypatch):
-    monkeypatch.delenv("FINAM_API_TOKEN", raising=False)
+    monkeypatch.delenv("F.INVEST_TOKEN", raising=False)
     monkeypatch.delenv("FINAM_TOKEN", raising=False)
     path = cli.main(integration.arguments + [
         "--account-id", "selected-account", "--token", "test-cli-secret",
@@ -152,7 +152,7 @@ def test_tbank_analytics_stays_opt_in(integration, monkeypatch, tmp_path):
 
 
 def test_offline_analysis_remains_independent_of_finam(tmp_path, monkeypatch):
-    monkeypatch.delenv("FINAM_API_TOKEN", raising=False)
+    monkeypatch.delenv("F.INVEST_TOKEN", raising=False)
     monkeypatch.delenv("FINAM_TOKEN", raising=False)
     monkeypatch.setattr(cli, "create_broker", lambda *args: pytest.fail("broker was called"))
     monkeypatch.setattr(cli, "load_config", lambda *args: pytest.fail("config was called"))

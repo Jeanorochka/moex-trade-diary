@@ -29,10 +29,8 @@ class FinamBroker(BrokerAdapter):
         self.history_window_days = int(settings.get("history_batch_days", settings.get("history_window_days", 30)))
         if self.timeout <= 0 or self.trade_limit <= 0 or self.history_window_days <= 0:
             raise ValueError("Finam: timeout, trade_limit и history_window_days должны быть положительными")
-        token_env = str(settings.get("token_env", "FINAM_API_TOKEN"))
+        token_env = str(settings.get("token_env", "F.INVEST_TOKEN"))
         self.token = str(settings.get("token") or os.getenv(token_env, "")).strip()
-        if not self.token and token_env == "FINAM_API_TOKEN":
-            self.token = os.getenv("FINAM_TOKEN", "").strip()
         if not self.token:
             raise RuntimeError(f"Не найден токен Finam. Укажи {token_env} в окружении или .env.")
         is_jwt = self.token.startswith("eyJ") and self.token.count(".") == 2
