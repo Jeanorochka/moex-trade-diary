@@ -112,9 +112,11 @@ def clean_report(analysis, portfolio, summary, dates):
         end = row - 1
         space()
         chart_height = max(330, min(870, len(assets) * 25 + 90))
-        if page_height + chart_height * 0.75 > 725:
+        if page_height + 31 + chart_height * 0.75 > 725:
             breaks.append(row - 1)
             page_height = 0
+        metric_rows([("комиссий всего:", summary.get("commission") if summary.get("trading_history_loaded") is not False else None, MONEY_FORMAT)])
+        space()
         charts[f"A{row}"] = {
             "type": "bar", "title": "закрытый + открытый результат" + (", до комиссий" if gross else ""),
             "categories_range": f"'{SHEET}'!$B${start}:$B${end}",
