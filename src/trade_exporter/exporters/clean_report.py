@@ -85,7 +85,7 @@ def clean_report(analysis, portfolio, summary, dates):
             cell("E", Decimal(str(value)) if value is not None else None, format_code, bold=True)
             height(21)
 
-    title("дневник сделок", True)
+    title("Расширенный брокерский отчет", True)
     title(f"{dates[0]:%d.%m.%Y} — {dates[1]:%d.%m.%Y}")
     results("сделки, до комиссий" if gross else "сделки", closed)
     if opened:

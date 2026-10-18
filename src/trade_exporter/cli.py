@@ -28,7 +28,7 @@ BROKER_NAMES = {"finam": "Финам", "tbank": "Т-Банк"}
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Выгрузка сделок и аналитика дневника")
+    parser = argparse.ArgumentParser(description="Расширенный брокерский отчет")
     parser.add_argument("--config", default="config.toml")
     parser.add_argument("--broker", choices=available_brokers())
     parser.add_argument("--token", help="API-токен Финама; по умолчанию из F.INVEST_TOKEN")

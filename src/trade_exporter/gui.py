@@ -233,7 +233,7 @@ class _Window:
         self.cash_flows = []
         self.busy = False
         self.window = tk.Tk()
-        self.window.title("Дневник сделок")
+        self.window.title("Расширенный брокерский отчет")
         self.window.geometry("700x760")
         self.window.minsize(660, 710)
         self.window.protocol("WM_DELETE_WINDOW", self._close)

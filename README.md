@@ -1,4 +1,4 @@
-# дневник сделок
+# Расширенный брокерский отчет
 Библиотеки - polars, orjson, primp, fastexcel и xlsxturbo <br>
 <br>
 v. 2.0.1 - обновлены старые библиотеки (Pandas, httpsx ... ) и заместо них теперь растовые Polars, Primp, orjson<br>
