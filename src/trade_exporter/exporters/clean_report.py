@@ -1,5 +1,5 @@
 from decimal import Decimal
-from math import ceil
+from math import ceil, floor, log10
 from pathlib import Path
 from tempfile import TemporaryFile
 from xml.etree import ElementTree as ET
@@ -34,7 +34,7 @@ def clean_report(analysis, portfolio, summary, dates):
     def cell(column, value, format_code=None, **style):
         if isinstance(value, Decimal):
             value = float(value)
-        options = {"value": value, "format": {"font_name": "Calibri", "font_size": 10, "font_color": ink, "align_vertical": "center", **style}}
+        options = {"value": value, "format": {"font_name": "Calibri", "font_size": 10, "font_color": ink, "align_vertical": "center", "border": True, "border_color": "#CBD5E1", **style}}
         if format_code:
             options["num_format"] = format_code
         cells[f"{column}{row}"] = options
@@ -64,6 +64,8 @@ def clean_report(analysis, portfolio, summary, dates):
         header = ("дата", "тикер", "вход", "сейчас" if open_section else "выход / сейчас" if text in {"лучшие 5", "худшие 5"} else "выход", f"финрез, {currency}")
         headers(header)
         if not rows:
+            for column in "ABCDE":
+                cell(column, None)
             cell("B", "—")
             height()
         for item in rows:
@@ -79,7 +81,7 @@ def clean_report(analysis, portfolio, summary, dates):
 
     def metric_rows(rows):
         for label, value, format_code in rows:
-            merged.append((f"A{row}:D{row}", label, {"font_name": "Calibri", "font_size": 10, "font_color": ink, "align_vertical": "center"}))
+            merged.append((f"A{row}:D{row}", label, {"font_name": "Calibri", "font_size": 10, "font_color": ink, "align_vertical": "center", "border": True, "border_color": "#CBD5E1"}))
             cell("E", Decimal(str(value)) if value is not None else None, format_code, bold=True)
             height(21)
 
@@ -101,6 +103,7 @@ def clean_report(analysis, portfolio, summary, dates):
         headers(("", "тикер", "закрыто", "открыто", "итого"))
         start = row
         for ticker, realized, unrealized, total in assets:
+            cell("A", None)
             cell("B", ticker)
             cell("C", realized, MONEY_FORMAT)
             cell("D", unrealized, MONEY_FORMAT)
@@ -177,7 +180,37 @@ def set_print_layout(path, last_row, breaks):
                     chart_ns = "http://schemas.openxmlformats.org/drawingml/2006/chart"
                     for labels in chart.findall(f".//{{{chart_ns}}}catAx/{{{chart_ns}}}tickLblPos"):
                         labels.set("val", "low")
+                    _format_chart_numbers(chart, chart_ns)
                     data = ET.tostring(chart, encoding="utf-8", xml_declaration=True)
                 target.writestr(info, data)
         buffer.seek(0)
         path.write_bytes(buffer.read())
+
+
+def _format_chart_numbers(chart, namespace):
+    def tag(name):
+        return f"{{{namespace}}}{name}"
+
+    values = [float(value.text) for value in chart.findall(f".//{tag('val')}//{tag('pt')}/{tag('v')}") if value.text]
+    low, high = min([0, *values]), max([0, *values])
+    target = (high - low) / 4 or 1
+    scale = 10 ** floor(log10(target))
+    step = next(factor * scale for factor in (1, 2, 5, 10) if factor * scale >= target)
+    format_code = "#,##0" if step >= 1 else "#,##0." + "0" * ceil(-log10(step))
+    drawing_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for axis in chart.findall(f".//{tag('valAx')}"):
+        axis.find(tag("numFmt")).attrib.update(formatCode=format_code, sourceLinked="0")
+        scaling = axis.find(tag("scaling"))
+        ET.SubElement(scaling, tag("max"), {"val": str(ceil(high / step) * step if high else 0)})
+        ET.SubElement(scaling, tag("min"), {"val": str(floor(low / step) * step if low else 0)})
+        if low == high:
+            scaling.find(tag("max")).set("val", str(step))
+        ET.SubElement(axis, tag("majorUnit"), {"val": str(step)})
+        text = ET.Element(tag("txPr"))
+        ET.SubElement(text, f"{{{drawing_ns}}}bodyPr", {"rot": "0"})
+        ET.SubElement(text, f"{{{drawing_ns}}}lstStyle")
+        paragraph = ET.SubElement(text, f"{{{drawing_ns}}}p")
+        properties = ET.SubElement(paragraph, f"{{{drawing_ns}}}pPr")
+        font = ET.SubElement(properties, f"{{{drawing_ns}}}defRPr", {"sz": "1100"})
+        ET.SubElement(font, f"{{{drawing_ns}}}latin", {"typeface": "Calibri"})
+        axis.insert(list(axis).index(axis.find(tag("crossAx"))), text)
