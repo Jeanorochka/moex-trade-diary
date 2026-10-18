@@ -103,7 +103,7 @@ def test_finam_env_token_selects_account_and_exports_analytics_by_default(
     path = cli.main(integration.arguments)
     assert path.exists()
     assert integration.created[0].token == "test-env-secret"
-    assert path.name.startswith("report_finam_")
+    assert path.name == "11.09.2026_11.09.2026.xlsx"
     assert integration.fill_requests == [(
         "selected-account", datetime(2026, 9, 1, tzinfo=UTC),
         datetime(2026, 9, 12, tzinfo=UTC),
@@ -114,7 +114,7 @@ def test_finam_env_token_selects_account_and_exports_analytics_by_default(
     assert list(tmp_path.glob("*.xlsx")) == [path]
     assert list(tmp_path.glob("*.json")) == [path.with_suffix(".json")]
     assert not list(tmp_path.rglob("*.html"))
-    assert "Лидеры и потери" in pl.read_excel(path, sheet_id=0)
+    assert list(pl.read_excel(path, sheet_id=0)) == ["Отчёт"]
     assert "finam test" in capsys.readouterr().out
 
 
@@ -154,7 +154,7 @@ def test_tbank_exports_one_workbook_with_analytics(integration, monkeypatch, tmp
     assert list(tmp_path.glob("*.xlsx")) == [path]
     assert path.with_suffix(".json").is_file()
     assert not list(tmp_path.rglob("*.html"))
-    assert "Лидеры и потери" in pl.read_excel(path, sheet_id=0)
+    assert list(pl.read_excel(path, sheet_id=0)) == ["Отчёт"]
 
 
 def test_offline_analysis_remains_independent_of_finam(tmp_path, monkeypatch):

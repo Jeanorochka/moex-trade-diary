@@ -15,7 +15,7 @@ from trade_exporter.config import load_config
 from trade_exporter.domain.models import Account
 from trade_exporter.exporters.report import export_report
 from trade_exporter.exporters.excel import ExcelExporter
-from trade_exporter.services.analytics import analyze_file
+from trade_exporter.services.analytics import analyze_file, load_report_portfolio
 from trade_exporter.services.export_service import ExportTradeHistory
 from trade_exporter.services.finam_service import execute_finam
 from trade_exporter.services.matcher import FifoMatcher
@@ -137,8 +137,8 @@ def choose_broker(args, cfg):
         print("Нужен номер брокера из списка.")
 
 
-def print_analysis(report, output_dir):
-    workbook, json_path = export_report(report, output_dir)
+def print_analysis(report, output_dir, portfolio_report=None):
+    workbook, json_path = export_report(report, output_dir, portfolio_report=portfolio_report)
     print(f"Excel: {workbook.resolve()}")
     print(f"JSON: {json_path.resolve()}")
     return workbook, json_path
@@ -163,7 +163,7 @@ def main(argv=None, *, progress=None):
     if args.analyze:
         status("Анализ готового файла")
         report = analyze_file(args.analyze, starting_capital=args.starting_capital)
-        return print_analysis(report, args.output_dir or args.analyze.parent / "analytics")
+        return print_analysis(report, args.output_dir or args.analyze.parent / "analytics", load_report_portfolio(args.analyze))
 
     load_dotenv()
     cfg = load_config(args.config)
@@ -292,6 +292,7 @@ def export_selected_period(
     path, json_path = export_report(
         report, output_dir, portfolio_report=portfolio_report,
         prefix=f"report_{broker_name}", details=details,
+        period_from=period_from, period_to=period_to_exclusive - timedelta(microseconds=1),
     )
     print(f"Excel: {path.resolve()}")
     print(f"JSON: {json_path.resolve()}")

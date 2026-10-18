@@ -75,7 +75,7 @@ def test_deposit_is_removed_and_period_ledger_is_exported(tmp_path, monkeypatch)
     paths = service.save_portfolio_report(portfolio, tmp_path)
     payload = orjson.loads(paths[1].read_bytes())
     assert payload["portfolio"]["period_flows"][0]["amount"] == "100.000000000000000000"
-    assert "Потоки периода" in pl.read_excel(paths[0], sheet_id=0)
+    assert list(pl.read_excel(paths[0], sheet_id=0)) == ["Отчёт"]
 
 
 def test_missing_external_transfer_value_does_not_become_zero_funding(tmp_path, monkeypatch):

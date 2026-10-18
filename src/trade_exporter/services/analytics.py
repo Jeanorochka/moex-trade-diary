@@ -303,6 +303,9 @@ def load_diary(path: str | Path) -> pl.DataFrame:
             sheets = fastexcel.read_excel(path).sheet_names
             if not sheets:
                 raise ValueError("В книге нет листов")
+            if sheets == ["Отчёт"]:
+                payload = _clean_payload(path)
+                return pl.DataFrame(payload["results"]) if payload["results"] else pl.DataFrame(schema=TRADE_SCHEMA)
             if "Результаты" in sheets:
                 results = pl.read_excel(
                     path, sheet_name="Результаты", engine="calamine", infer_schema_length=None,
@@ -343,6 +346,28 @@ def analyze_file(
     else:
         report = analyze_frame(frame, starting_capital)
     path = Path(path)
+    if path.suffix.lower() == ".xlsx" and fastexcel.read_excel(path).sheet_names == ["Отчёт"]:
+        payload = _clean_payload(path)
+        saved = dict(payload["summary"])
+        period = saved.get("portfolio_period")
+        if period is not None:
+            period = validate_portfolio_period(period)
+            capital = period.get("starting_equity")
+            if capital is not None and starting_capital > 0 and capital != starting_capital:
+                raise ValueError("Стартовый капитал отличается от записанного в оценке портфеля")
+            saved["portfolio_period"] = period
+        for key, value in saved.items():
+            if value is not None and isinstance(report.summary.get(key), Decimal):
+                saved[key] = Decimal(str(value))
+        for key in ("headline_profit", "headline_return"):
+            if saved.get(key) is not None:
+                saved[key] = Decimal(str(saved[key]))
+        for metric in (saved.get("risk") or {}).get("metrics", []):
+            if metric.get("value") is not None:
+                metric["value"] = _money(metric["value"], 0, metric["metric"], round_excess=True)
+        report.summary.update(saved)
+        report.details.update(payload.get("details") or {})
+        return report
     if path.suffix.lower() != ".xlsx" or "Параметры расчёта" not in fastexcel.read_excel(path).sheet_names:
         return report
     try:
@@ -434,3 +459,45 @@ def analyze_file(
     except (ValueError, TypeError, pl.exceptions.PolarsError) as error:
         raise ValueError(f"Некорректные параметры расчёта в {path.name}: {error}") from error
     return report
+
+
+def _clean_payload(path):
+    companion = Path(path).with_suffix(".json")
+    if not companion.is_file():
+        raise ValueError(f"Для анализа чистого отчёта нужен JSON рядом с Excel: {companion.name}")
+    payload = orjson.loads(companion.read_bytes())
+    if not isinstance(payload, dict) or payload.get("kind") != "trade_portfolio_report" or payload.get("version") != 1 or not isinstance(payload.get("results"), list) or not isinstance(payload.get("summary"), dict):
+        raise ValueError("Некорректный JSON отчёта")
+    return payload
+
+
+def load_report_portfolio(path):
+    path = Path(path)
+    if path.suffix.lower() != ".xlsx" or fastexcel.read_excel(path).sheet_names != ["Отчёт"]:
+        return None
+    payload = _clean_payload(path).get("portfolio")
+    if payload is None:
+        return None
+    from trade_exporter.domain.portfolio import PortfolioReport, PortfolioSnapshot
+    from trade_exporter.services.portfolio import analyze_portfolio
+
+    template = analyze_portfolio(PortfolioSnapshot("schema", "finam", datetime.now(UTC), "RUB", ZERO))
+
+    def frame(name):
+        records = payload.get(name)
+        if records is None:
+            return None
+        schema = getattr(template, name if name != "period_flows" else "flows").schema
+        rows = [dict(row) for row in records]
+        for row in rows:
+            for column, dtype in schema.items():
+                value = row.get(column)
+                if value is None:
+                    continue
+                if isinstance(dtype, pl.Decimal):
+                    row[column] = Decimal(str(value))
+                elif isinstance(dtype, pl.Datetime):
+                    row[column] = datetime.fromisoformat(value)
+        return pl.DataFrame(rows, schema=schema)
+
+    return PortfolioReport(payload["summary"], *(frame(name) for name in ("positions", "allocation", "cash", "flows", "period_flows")))

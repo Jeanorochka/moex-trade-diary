@@ -137,8 +137,7 @@ def test_token_to_broker_report_to_whole_portfolio_results(tmp_path, monkeypatch
     assert list(tmp_path.glob("*.xlsx")) == [path]
     assert list(tmp_path.glob("*.json")) == [path.with_suffix(".json")]
     workbook = pl.read_excel(path, sheet_id=0)
-    assert "Лидеры и потери" in workbook
-    assert len(workbook) <= 7
+    assert list(workbook) == ["Отчёт"]
     assert len(payload["details"]["raw_executions"]) == 2
     assert Decimal(payload["details"]["closed_records"][0]["net_pnl"]) == 8
     assert Decimal(payload["summary"]["gross_pnl"]) == 525

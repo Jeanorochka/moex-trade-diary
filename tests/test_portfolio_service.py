@@ -208,7 +208,7 @@ def test_entered_capital_gives_annualized_return_in_the_first_export(tmp_path, m
     assert metrics["capital_period_profit"]["value"] == 200
     assert metrics["capital_period_return"]["value"] == pytest.approx(0.2)
     assert metrics["capital_period_annualized"]["value"] == pytest.approx(0.2)
-    assert "Риск и доходность" in pl.read_excel(paths[0], sheet_id=0)
+    assert list(pl.read_excel(paths[0], sheet_id=0)) == ["Отчёт"]
 
 
 def test_entered_capital_uses_period_flows_without_initial_funding_history(tmp_path, monkeypatch):

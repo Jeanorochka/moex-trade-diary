@@ -100,9 +100,11 @@ def test_year_old_unsold_share_is_valued_from_current_broker_portfolio(broker_na
     assert Decimal(position["cost_basis"]) == 1000
     assert Decimal(position["market_value"]) == 1200
     assert Decimal(str(position["unrealized_return"])) == Decimal("0.2")
-    workbook = pl.read_excel(paths[0], sheet_name="Позиции")
-    assert workbook.height == 1
+    from trade_exporter.services.analytics import load_report_portfolio
+    restored = load_report_portfolio(paths[0])
+    assert restored.positions.height == 1
+    assert restored.positions["quantity"][0] == 10
     assert len(paths) == 2
     assert not list(tmp_path.rglob("*.html"))
-    assert "Лидеры и потери" in pl.read_excel(paths[0], sheet_id=0)
+    assert list(pl.read_excel(paths[0], sheet_id=0)) == ["Отчёт"]
     assert "Excel:" in capsys.readouterr().out

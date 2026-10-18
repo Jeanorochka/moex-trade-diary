@@ -103,8 +103,8 @@ def test_manual_journal_survives_excel_json_and_offline_analysis(tmp_path, monke
     assert data["summary"]["portfolio_period"]["cash_flow_mode"] == "manual"
     assert data["portfolio"]["period_flows"]
     assert analyze_file(paths[0]).summary["trading_history_loaded"] is False
-    first = pl.read_excel(paths[0], sheet_name="Портфель за период")
-    assert any("ручн" in str(value).lower() for value in first["основание"])
+    assert list(pl.read_excel(paths[0], sheet_id=0)) == ["Отчёт"]
+    assert analyze_file(paths[0]).summary["portfolio_period"]["cash_flow_mode"] == "manual"
     trading = analyze_results(pl.DataFrame({
         "date": [START.date()], "ticker": ["STOCK"], "gross_pnl": ["-1"],
         "commission": ["0"], "event_type": ["stock_fifo"],
