@@ -15,6 +15,7 @@ dependencies = [
     "xlsxturbo>=1.11.0,<2",
     "python-dotenv>=1.2.4,<2",
     "tzdata>=2026.5; sys_platform == 'win32'",
+    "pyside6-essentials>=6.12,<7",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,9 @@ trade-exporter = "trade_exporter.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+trade_exporter = ["ui/icons/*.svg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
