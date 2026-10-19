@@ -78,7 +78,7 @@ def table(headers, rows=(), *, profit_columns=(), price_columns=(), stretch_colu
     view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     view.verticalHeader().hide()
-    view.verticalHeader().setDefaultSectionSize(40)
+    view.verticalHeader().setDefaultSectionSize(34)
     view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     view.horizontalHeader().setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
     view.setSortingEnabled(True)

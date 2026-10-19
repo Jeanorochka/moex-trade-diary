@@ -5,7 +5,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from trade_exporter.ui.theme import GREEN, INK, MUTED, PURPLE, RED, number
+from trade_exporter.ui.theme import GREEN, GRID, INK, MUTED, PURPLE, RED, SURFACE, number
 
 
 def bounds(values):
@@ -23,19 +23,19 @@ class AssetChart(QWidget):
         self.hits = []
         self.currency = "RUB"
         self.setMouseTracking(True)
-        self.setMinimumHeight(310)
+        self.setMinimumHeight(260)
 
     def set_data(self, rows, currency):
         self.rows = sorted(rows, key=lambda row: (row[3] is not None, row[3] or 0), reverse=True)
         self.currency = currency
-        self.setMinimumHeight(max(310, len(self.rows) * 36 + 76))
+        self.setMinimumHeight(max(260, len(self.rows) * 32 + 70))
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#FFFFFF"))
-        painter.setFont(QFont("Segoe UI", 9))
+        painter.fillRect(self.rect(), QColor(SURFACE))
+        painter.setFont(QFont("Segoe UI", 8))
         self.hits = []
         if not self.rows:
             painter.setPen(QColor(MUTED))
@@ -43,22 +43,22 @@ class AssetChart(QWidget):
             painter.end()
             return
         low, high, step = bounds([float(row[3]) for row in self.rows if row[3] is not None])
-        left, right, top = 175, self.width() - 125, 26
+        left, right, top = 155, self.width() - 120, 22
         width = max(80, right - left)
         zero = left + (0 - low) / (high - low) * width
         painter.setFont(QFont("Segoe UI", 8))
         for index in range(round((high - low) / step) + 1):
             value = low + index * step
             x = left + (value - low) / (high - low) * width
-            painter.setPen(QPen(QColor("#E9EBF3"), 1))
+            painter.setPen(QPen(QColor(GRID), 1))
             painter.drawLine(QPointF(x, top), QPointF(x, self.height() - 40))
             painter.setPen(QColor(MUTED))
             painter.drawText(QRectF(x - 50, self.height() - 31, 100, 24), Qt.AlignmentFlag.AlignCenter, number(value, digits=0 if step >= 1 else 2))
-        painter.setPen(QPen(QColor("#C4C9D7"), 1))
+        painter.setPen(QPen(QColor("#58627A"), 1))
         painter.drawLine(QPointF(zero, top), QPointF(zero, self.height() - 40))
-        painter.setFont(QFont("Segoe UI", 9))
+        painter.setFont(QFont("Segoe UI", 8))
         for index, (ticker, realized, opened, total) in enumerate(self.rows):
-            y = top + index * 36
+            y = top + index * 32
             painter.setPen(QColor(INK))
             text = painter.fontMetrics().elidedText(str(ticker), Qt.TextElideMode.ElideMiddle, left - 28)
             painter.drawText(QRectF(10, y, left - 28, 28), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, text)
@@ -89,7 +89,7 @@ class ResultChart(QWidget):
         self.rows = []
         self.points = []
         self.setMouseTracking(True)
-        self.setMinimumHeight(300)
+        self.setMinimumHeight(250)
 
     def set_data(self, rows):
         self.rows = list(rows)
@@ -98,8 +98,8 @@ class ResultChart(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#FFFFFF"))
-        painter.setFont(QFont("Segoe UI", 9))
+        painter.fillRect(self.rect(), QColor(SURFACE))
+        painter.setFont(QFont("Segoe UI", 8))
         self.points = []
         if not self.rows:
             painter.setPen(QColor(MUTED))
@@ -112,7 +112,7 @@ class ResultChart(QWidget):
         for index in range(round((high - low) / step) + 1):
             value = low + index * step
             y = bottom - (value - low) / (high - low) * (bottom - top)
-            painter.setPen(QPen(QColor("#E9EBF3"), 1))
+            painter.setPen(QPen(QColor(GRID), 1))
             painter.drawLine(QPointF(left, y), QPointF(right, y))
             painter.setPen(QColor(MUTED))
             painter.drawText(QRectF(0, y - 12, left - 12, 24), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, number(value, digits=0 if step >= 1 else 2))
@@ -131,8 +131,8 @@ class ResultChart(QWidget):
         area.lineTo(self.points[0].x(), bottom)
         area.closeSubpath()
         gradient = QLinearGradient(0, top, 0, bottom)
-        gradient.setColorAt(0, QColor("#DED7FA"))
-        gradient.setColorAt(1, QColor("#FFFFFF"))
+        gradient.setColorAt(0, QColor("#493D69"))
+        gradient.setColorAt(1, QColor(SURFACE))
         painter.fillPath(area, gradient)
         painter.setPen(QPen(QColor(PURPLE), 2.5))
         painter.drawPath(path)

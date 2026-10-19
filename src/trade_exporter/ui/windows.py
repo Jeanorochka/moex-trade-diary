@@ -15,7 +15,7 @@ from trade_exporter import gui
 from trade_exporter.services.file_analysis import analysis_worker
 from trade_exporter.ui.charts import AssetChart, ResultChart
 from trade_exporter.ui.tables import table
-from trade_exporter.ui.theme import TITLE, button, card, label, number, tone
+from trade_exporter.ui.theme import INK, MUTED, TITLE, button, card, label, number, tone
 
 
 def _date_edit(day):
@@ -116,8 +116,8 @@ class ExportWindow(_JobWindow):
         self.analysis_window = None
         self.result_path = None
         self.setWindowTitle(TITLE)
-        self.resize(1100, 880)
-        self.setMinimumSize(960, 720)
+        self.resize(1000, 780)
+        self.setMinimumSize(860, 640)
         config_error = None
         try:
             config = gui._read_config(self.root_dir)
@@ -137,15 +137,15 @@ class ExportWindow(_JobWindow):
         shell.setSpacing(0)
         rail = QFrame()
         rail.setObjectName("Rail")
-        rail.setFixedWidth(205)
+        rail.setFixedWidth(185)
         navigation = QVBoxLayout(rail)
-        navigation.setContentsMargins(20, 30, 20, 24)
+        navigation.setContentsMargins(18, 24, 18, 20)
         navigation.setSpacing(10)
         mark = label("↗", "Heading")
-        mark.setStyleSheet("color: #C5B8FF; font-size: 38px;")
+        mark.setStyleSheet("color: #C5B8FF; font-size: 32px;")
         navigation.addWidget(mark)
         navigation.addWidget(label("Расширенный\nброкерский отчет", "Section", True))
-        navigation.addSpacing(28)
+        navigation.addSpacing(22)
         export_nav = button("Выгрузка", lambda: None)
         export_nav.setObjectName("Nav")
         export_nav.setCheckable(True)
@@ -165,11 +165,11 @@ class ExportWindow(_JobWindow):
         content.setObjectName("Content")
         scroll.setWidget(content)
         body = QVBoxLayout(content)
-        body.setContentsMargins(28, 25, 28, 24)
-        body.setSpacing(18)
+        body.setContentsMargins(22, 20, 22, 20)
+        body.setSpacing(14)
         body.addWidget(label("БРОКЕРСКИЙ ОТЧЁТ", "Eyebrow"))
         body.addWidget(label("Выгрузка и аналитика", "Heading"))
-        body.addWidget(label("Выберите счёт и период, мы подготовим отчёт.", "Muted"))
+        body.addWidget(label("Выберите счёт и период", "Muted"))
         account_card, form = card("Параметры отчёта")
         self.broker_box = QComboBox()
         self.broker_box.addItem("Выберите брокера", None)
@@ -384,7 +384,7 @@ class _Metric(QFrame):
         super().__init__()
         self.setObjectName("Card")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setContentsMargins(14, 12, 14, 12)
         self.title = label("", "Muted")
         self.value = label("—", "MetricValue")
         self.unit = label("", "Muted")
@@ -395,7 +395,7 @@ class _Metric(QFrame):
     def display(self, title, value, mode, currency, colored=True):
         self.title.setText(title)
         self.value.setText(number(Decimal(str(value)) if value is not None else None, percent=mode == "percent"))
-        self.value.setStyleSheet(f"color: {tone(value).name() if colored else '#263149'};")
+        self.value.setStyleSheet(f"color: {tone(value).name() if colored else INK};")
         self.unit.setText(currency if mode == "money" else "Доходность")
 
 
@@ -405,13 +405,13 @@ class AnalysisWindow(_JobWindow):
         self.root_dir = Path(root_dir or Path.cwd())
         self.analysis = None
         self.setWindowTitle("Аналитика файла · " + TITLE)
-        self.resize(1160, 900)
-        self.setMinimumSize(940, 740)
+        self.resize(1060, 800)
+        self.setMinimumSize(860, 660)
         central = QWidget()
         self.setCentralWidget(central)
         body = QVBoxLayout(central)
-        body.setContentsMargins(28, 24, 28, 24)
-        body.setSpacing(16)
+        body.setContentsMargins(22, 20, 22, 20)
+        body.setSpacing(12)
         body.addWidget(label("АНАЛИТИКА ФАЙЛА", "Eyebrow"))
         body.addWidget(label("Портфель в цифрах", "Heading"))
         source, source_layout = card()
@@ -438,12 +438,12 @@ class AnalysisWindow(_JobWindow):
         body.addWidget(self.message)
         self.empty = label("◎\n\nЗдесь появятся показатели, графики и сделки\nВыберите файл отчёта выше", "Muted", True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty.setStyleSheet("font-size: 17px; color: #8C92A9; line-height: 1.8;")
+        self.empty.setStyleSheet(f"font-size: 15px; color: {MUTED};")
         body.addWidget(self.empty, 1)
         self.dashboard = QWidget()
         dashboard = QVBoxLayout(self.dashboard)
         dashboard.setContentsMargins(0, 0, 0, 0)
-        dashboard.setSpacing(14)
+        dashboard.setSpacing(10)
         self.cards = [_Metric() for _ in range(4)]
         dashboard.addWidget(_row(*self.cards))
         self.quality = label("", "Notice", True)
