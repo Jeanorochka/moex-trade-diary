@@ -1,0 +1,56 @@
+name: Capture BCS main window
+on:
+  push:
+    branches: [bcs-screenshot]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_SCALE_FACTOR: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked --python 3.12
+      - name: Capture the actual Qt window
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from PySide6.QtCore import QLocale
+          from PySide6.QtWidgets import QApplication
+          from trade_exporter.ui.theme import configure_app
+          from trade_exporter.ui.windows import ExportWindow
+
+          QLocale.setDefault(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
+          app = QApplication([])
+          configure_app(app)
+          window = ExportWindow(Path.cwd())
+          window.resize(977, 762)
+          window.broker_box.setCurrentIndex(window.broker_box.findData("bcs"))
+          window.output.setText(r"C:\MOEX Trade Diary\exports")
+          window.show()
+          app.processEvents()
+          assert window.broker_box.currentText() == "БКС"
+          shot = window.grab()
+          assert (shot.width(), shot.height()) == (977, 762)
+          assert shot.save("moex-trade-diary-main.png")
+          '@ | Set-Content -Encoding utf8 capture_window.py
+          uv run --no-sync python capture_window.py
+      - name: Export the PNG bytes for transfer
+        shell: pwsh
+        run: |
+          $png = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'moex-trade-diary-main.png').Path))
+          for ($i = 0; $i -lt $png.Length; $i += 4000) {
+            "SCREENSHOT_CHUNK=" + $png.Substring($i, [Math]::Min(4000, $png.Length - $i))
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moex-trade-diary-main
+          path: moex-trade-diary-main.png
+          if-no-files-found: error
