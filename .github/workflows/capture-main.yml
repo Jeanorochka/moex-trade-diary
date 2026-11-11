@@ -8,47 +8,51 @@ permissions:
 
 jobs:
   capture:
-    runs-on: windows-latest
+    runs-on: ubuntu-22.04
     env:
-      QT_QPA_PLATFORM: offscreen
       QT_SCALE_FACTOR: '1'
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v7
+      - name: Install Qt display libraries and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-shape0 libxcb-icccm4 libxcb-keysyms1 xvfb xauth fonts-dejavu-core
       - run: uv sync --locked --python 3.12
       - name: Capture the actual Qt window
-        shell: pwsh
         run: |
-          @'
+          cat > capture_window.py <<'PY'
+          import base64
           from pathlib import Path
           from PySide6.QtCore import QLocale
+          from PySide6.QtGui import QFont, QFontMetrics
           from PySide6.QtWidgets import QApplication
           from trade_exporter.ui.theme import configure_app
           from trade_exporter.ui.windows import ExportWindow
 
           QLocale.setDefault(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
           app = QApplication([])
+          QFont.insertSubstitution("Segoe UI", "DejaVu Sans")
           configure_app(app)
+          assert QFontMetrics(QFont("DejaVu Sans")).inFont("Б")
           window = ExportWindow(Path.cwd())
           window.resize(977, 762)
           window.broker_box.setCurrentIndex(window.broker_box.findData("bcs"))
-          window.output.setText(r"C:\MOEX Trade Diary\exports")
+          window.output.setText(str(Path.home() / "moex-trade-diary" / "exports"))
           window.show()
           app.processEvents()
           assert window.broker_box.currentText() == "БКС"
           shot = window.grab()
           assert (shot.width(), shot.height()) == (977, 762)
-          assert shot.save("moex-trade-diary-main.png")
-          '@ | Set-Content -Encoding utf8 capture_window.py
-          uv run --no-sync python capture_window.py
-      - name: Export the PNG bytes for transfer
-        shell: pwsh
-        run: |
-          $png = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path 'moex-trade-diary-main.png').Path))
-          for ($i = 0; $i -lt $png.Length; $i += 4000) {
-            "SCREENSHOT_CHUNK=" + $png.Substring($i, [Math]::Min(4000, $png.Length - $i))
-          }
+          path = Path("moex-trade-diary-main.png")
+          assert shot.save(str(path))
+          png = base64.b64encode(path.read_bytes()).decode()
+          for i in range(0, len(png), 4000):
+              print("SCREENSHOT_CHUNK=" + png[i:i+4000])
+          PY
+          QT_QPA_PLATFORM=xcb xvfb-run -a uv run --no-sync python capture_window.py
       - uses: actions/upload-artifact@v4
         with:
           name: moex-trade-diary-main
