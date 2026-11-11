@@ -87,6 +87,8 @@ def clean_report(analysis, portfolio, summary, dates):
 
     title("Расширенный брокерский отчет", True)
     title(f"{dates[0]:%d.%m.%Y} — {dates[1]:%d.%m.%Y}")
+    if summary.get("result_complete") is False:
+        title("Торговый результат рассчитан по неполным данным")
     results("сделки, до комиссий" if gross else "сделки", closed)
     if opened:
         results("открытые позиции", opened, True)
@@ -115,7 +117,8 @@ def clean_report(analysis, portfolio, summary, dates):
         if page_height + 31 + chart_height * 0.75 > 725:
             breaks.append(row - 1)
             page_height = 0
-        metric_rows([("комиссий всего:", summary.get("commission") if summary.get("trading_history_loaded") is not False else None, MONEY_FORMAT)])
+        commission_label = "известные комиссии:" if summary.get("commission_complete") is False else "комиссий всего:"
+        metric_rows([(commission_label, summary.get("commission") if summary.get("trading_history_loaded") is not False else None, MONEY_FORMAT)])
         space()
         charts[f"A{row}"] = {
             "type": "bar", "title": "закрытый + открытый результат" + (", до комиссий" if gross else ""),

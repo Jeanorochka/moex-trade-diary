@@ -76,26 +76,34 @@ class ExportTradeHistory:
             if fill.instrument_id in relevant:
                 currencies[fill.instrument_id].add(str(fill.currency or "").strip().upper())
         excluded = sorted(instrument for instrument, values in currencies.items() if values != {base_currency})
-        quality = [
+        quality = list(getattr(self.broker, "fill_quality", ()))
+        quality.extend(
             f"{instrument}: валюты исполнений {', '.join(value or 'не указана' for value in sorted(currencies[instrument]))} "
             f"не подтверждают единый результат в {base_currency}; инструмент исключён из торгового P&L без исторического валютного пересчёта."
             for instrument in excluded
-        ]
+        )
         excluded_closed = [trade for trade in selected if trade.instrument_id in excluded]
         selected = [trade for trade in selected if trade.instrument_id not in excluded]
 
         options = {}
         report = analyze_trades(selected, self.display_timezone, self.starting_capital)
         report.summary.update({
-            "base_currency": base_currency, "result_complete": not excluded,
+            "base_currency": base_currency, "result_complete": not quality,
             "excluded_instruments": excluded, "result_quality": quality,
         })
+        commission_quality = list(getattr(self.broker, "commission_quality", ()))
+        if commission_quality:
+            report.summary.update({
+                "commission_complete": False,
+                "commission_basis": commission_quality[0],
+                "commission_quality": commission_quality,
+            })
         self.analysis_report = report
         if self.starting_capital > 0 or self.portfolio_report is not None:
             report.summary["risk"] = analyze_result_risk(
                 report.daily, self.starting_capital, period_from, period_to_exclusive, base_currency=base_currency,
             )
-            for reason in quality:
+            for reason in [*quality, *commission_quality]:
                 report.summary["risk"]["quality"].append(reason)
                 for metric in report.summary["risk"]["metrics"]:
                     metric["quality_reason"] = " ".join(filter(None, (metric.get("quality_reason"), reason)))
@@ -146,6 +154,8 @@ class ExportTradeHistory:
         return path, selected
 
     def _history_start(self, account: Account, period_from: datetime) -> datetime:
-        if self.reconstruction_mode == "full" and account.opened_at is not None:
-            return account.opened_at.astimezone(period_from.tzinfo)
+        if self.reconstruction_mode == "full":
+            earliest = account.opened_at or getattr(self.broker, "trade_history_start", None)
+            if earliest is not None:
+                return earliest.astimezone(period_from.tzinfo)
         return period_from - timedelta(days=self.lookback_days)

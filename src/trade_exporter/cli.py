@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from trade_exporter.brokers.registry import available_brokers, create_broker
+from trade_exporter.brokers.registry import BROKER_NAMES, TOKEN_ENVS, available_brokers, create_broker
 from trade_exporter.config import load_config
 from trade_exporter.domain.models import Account
 from trade_exporter.exporters.report import export_report
@@ -23,13 +24,10 @@ from trade_exporter.services.portfolio_service import execute_portfolio, prepare
 from trade_exporter.services.manual_flows import parse_cash_flows
 
 
-TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
-BROKER_NAMES = {"finam": "Финам", "tbank": "Т-Банк"}
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Расширенный брокерский отчет")
-    parser.add_argument("--config", default="config.toml")
+    default_config = Path(sys.executable).resolve().parent / "config.toml" if getattr(sys, "frozen", False) else "config.toml"
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--broker", choices=available_brokers())
     parser.add_argument("--token", help="API-токен Финама; по умолчанию из F.INVEST_TOKEN")
     parser.add_argument("--account-id")
@@ -107,7 +105,7 @@ def choose_broker(args, cfg):
     selected = args.broker or configured
     if selected != "auto":
         if selected not in available_brokers():
-            raise ValueError("В app.broker укажи auto, finam или tbank.")
+            raise ValueError(f"В app.broker укажи auto или один из вариантов: {', '.join(available_brokers())}.")
         return selected
     if args.token is not None:
         return "finam"
@@ -121,15 +119,17 @@ def choose_broker(args, cfg):
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        raise RuntimeError("Не найден токен. Заполни F.INVEST_TOKEN для Финама или T.INVEST_TOKEN для Т-Банка в корневом .env.")
-    print("\nНайдены токены двух брокеров:")
+        variables = ", ".join(f"{TOKEN_ENVS[name]} ({BROKER_NAMES[name]})" for name in available_brokers())
+        raise RuntimeError(f"Не найден токен. Укажи один из токенов в .env: {variables}.")
+    print("\nНайдены токены нескольких брокеров:")
     for index, name in enumerate(candidates, 1):
         print(f"{index}. {BROKER_NAMES[name]}")
     while True:
         try:
             answer = input("Выбери брокера: ").strip().lower()
         except (EOFError, OSError) as error:
-            raise RuntimeError("Найдены оба токена. Укажи --broker finam или --broker tbank.") from error
+            choices = " или ".join(f"--broker {name}" for name in candidates)
+            raise RuntimeError(f"Найдено несколько токенов. Укажи {choices}.") from error
         if answer in candidates:
             return answer
         if answer.isdigit() and 1 <= int(answer) <= len(candidates):
@@ -165,7 +165,10 @@ def main(argv=None, *, progress=None):
         report = analyze_file(args.analyze, starting_capital=args.starting_capital)
         return print_analysis(report, args.output_dir or args.analyze.parent / "analytics", load_report_portfolio(args.analyze))
 
-    load_dotenv()
+    if getattr(sys, "frozen", False):
+        load_dotenv(Path(sys.executable).resolve().parent / ".env")
+    else:
+        load_dotenv()
     cfg = load_config(args.config)
     app_cfg = cfg.get("app", {})
     excel_cfg = cfg.get("excel", {})
@@ -188,6 +191,8 @@ def main(argv=None, *, progress=None):
         account = next((a for a in accounts if a.id == requested_id), None)
         if account is None:
             raise ValueError("Указанный account_id не найден среди доступных счетов.")
+    elif broker_name == "bcs" and len(accounts) == 1:
+        account = accounts[0]
     else:
         account = choose_account(accounts)
 
@@ -265,7 +270,7 @@ def export_selected_period(
                 print_portfolio(broker, account, output_dir, report=portfolio_report, progress=progress, source_report_dir=source_dir)
             raise
     else:
-        status("Загрузка и сопоставление сделок Т-Банка")
+        status(f"Загрузка и сопоставление сделок: {BROKER_NAMES[broker_name]}")
         use_case = ExportTradeHistory(
             broker=broker,
             matcher=FifoMatcher(),

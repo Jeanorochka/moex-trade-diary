@@ -1,0 +1,81 @@
+name: Build desktop binaries
+
+on:
+  push:
+    branches: [main, bcs-desktop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x64
+            executable: moex-trade-diary
+            platform-options: ''
+          - runner: windows-latest
+            target: windows-x64
+            executable: moex-trade-diary.exe
+            platform-options: '--hide-console hide-early'
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - name: Install Linux Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-shape0 libxcb-icccm4 libxcb-keysyms1 xvfb xauth xdotool
+      - name: Install project and test dependencies
+        run: uv sync --locked --extra dev --python 3.12
+      - name: Run tests
+        run: uv run --no-sync python -m pytest
+      - name: Install bundler
+        run: uv pip install "pyinstaller==6.21.0"
+      - name: Build executable
+        run: >-
+          uv run --no-sync python -m PyInstaller --noconfirm --clean --onefile
+          --name moex-trade-diary --paths src --python-option "X utf8"
+          --add-data "config.toml:."
+          --add-data "src/trade_exporter/ui/icons:trade_exporter/ui/icons"
+          --hidden-import PySide6.QtSvg
+          --collect-all polars --collect-all polars_runtime_32
+          --collect-all orjson --collect-all primp --collect-all fastexcel
+          --collect-all xlsxturbo --collect-data tzdata
+          ${{ matrix.platform-options }} main.py
+      - name: Smoke test executable
+        shell: bash
+        run: |
+          ./dist/${{ matrix.executable }} --help
+          printf '%s\n' 'date,ticker,entry_price,exit_price,gross_pnl,commission' '2026-01-01,AAA,10,12,20,2' > smoke.csv
+          ./dist/${{ matrix.executable }} --analyze smoke.csv --output-dir smoke-export
+          compgen -G 'smoke-export/*.xlsx' > /dev/null
+          compgen -G 'smoke-export/*.json' > /dev/null
+      - name: Verify the bundled Linux window
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a bash -ec '
+            QT_QPA_PLATFORM=xcb ./dist/moex-trade-diary &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true" EXIT
+            timeout 30s xdotool search --sync --onlyvisible --name "Расширенный брокерский отчет"
+          '
+      - name: Preserve Linux executable permissions
+        if: runner.os == 'Linux'
+        run: tar -czf dist/moex-trade-diary-linux-x64.tar.gz -C dist moex-trade-diary
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moex-trade-diary-${{ matrix.target }}
+          path: dist/${{ runner.os == 'Linux' && 'moex-trade-diary-linux-x64.tar.gz' || matrix.executable }}
+          if-no-files-found: error

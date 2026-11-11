@@ -31,3 +31,8 @@ history_batch_days = 30
 history_limit = 50
 report_timeout_seconds = 120
 report_poll_seconds = 2
+
+[bcs]
+token_env = "B.INVEST_TOKEN"
+base_url = "https://be.broker.ru"
+request_timeout_seconds = 30
