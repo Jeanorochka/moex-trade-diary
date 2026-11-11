@@ -45,7 +45,7 @@ jobs:
       - name: Build executable
         run: >-
           uv run --no-sync python -m PyInstaller --noconfirm --clean --onefile
-          --name moex-trade-diary --paths src
+          --name moex-trade-diary --paths src --python-option "X utf8"
           --add-data "config.toml:."
           --add-data "src/trade_exporter/ui/icons:trade_exporter/ui/icons"
           --hidden-import PySide6.QtSvg
@@ -54,7 +54,13 @@ jobs:
           --collect-all xlsxturbo --collect-data tzdata
           ${{ matrix.platform-options }} main.py
       - name: Smoke test executable
-        run: ./dist/${{ matrix.executable }} --help
+        shell: bash
+        run: |
+          ./dist/${{ matrix.executable }} --help
+          printf '%s\n' 'date,ticker,entry_price,exit_price,gross_pnl,commission' '2026-01-01,AAA,10,12,20,2' > smoke.csv
+          ./dist/${{ matrix.executable }} --analyze smoke.csv --output-dir smoke-export
+          compgen -G 'smoke-export/*.xlsx' > /dev/null
+          compgen -G 'smoke-export/*.json' > /dev/null
       - name: Preserve Linux executable permissions
         if: runner.os == 'Linux'
         run: tar -czf dist/moex-trade-diary-linux-x64.tar.gz -C dist moex-trade-diary
