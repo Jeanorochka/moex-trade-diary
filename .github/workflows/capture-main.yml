@@ -27,16 +27,22 @@ jobs:
           import base64
           from pathlib import Path
           from PySide6.QtCore import QLocale
-          from PySide6.QtGui import QFont, QFontMetrics
+          from PySide6.QtGui import QFont, QFontDatabase, QFontInfo
           from PySide6.QtWidgets import QApplication
           from trade_exporter.ui.theme import configure_app
           from trade_exporter.ui.windows import ExportWindow
 
           QLocale.setDefault(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
           app = QApplication([])
-          QFont.insertSubstitution("Segoe UI", "DejaVu Sans")
+          fonts = Path("/usr/share/fonts/truetype/dejavu")
+          font_id = QFontDatabase.addApplicationFont(str(fonts / "DejaVuSans.ttf"))
+          assert font_id >= 0
+          assert QFontDatabase.addApplicationFont(str(fonts / "DejaVuSans-Bold.ttf")) >= 0
+          family = QFontDatabase.applicationFontFamilies(font_id)[0]
           configure_app(app)
-          assert QFontMetrics(QFont("DejaVu Sans")).inFont("Б")
+          app.setFont(QFont(family, 9))
+          app.setStyleSheet(app.styleSheet().replace("Segoe UI", family))
+          print("Font:", QFontInfo(app.font()).family())
           window = ExportWindow(Path.cwd())
           window.resize(977, 762)
           window.broker_box.setCurrentIndex(window.broker_box.findData("bcs"))
