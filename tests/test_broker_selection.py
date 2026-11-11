@@ -13,12 +13,12 @@ from trade_exporter.domain.models import Account
 
 @pytest.fixture(autouse=True)
 def isolated_tokens(monkeypatch):
-    for key in ("F.INVEST_TOKEN", "T.INVEST_TOKEN", "INVEST_TOKEN", "FINAM_API_TOKEN", "FINAM_TOKEN", "TBANK_INVEST_TOKEN"):
+    for key in ("F.INVEST_TOKEN", "T.INVEST_TOKEN", "B.INVEST_TOKEN", "INVEST_TOKEN", "FINAM_API_TOKEN", "FINAM_TOKEN", "TBANK_INVEST_TOKEN"):
         monkeypatch.setenv(key, "")
         monkeypatch.delenv(key, raising=False)
 
 
-@pytest.mark.parametrize("key, expected", [("F.INVEST_TOKEN", "finam"), ("T.INVEST_TOKEN", "tbank")])
+@pytest.mark.parametrize("key, expected", [("F.INVEST_TOKEN", "finam"), ("T.INVEST_TOKEN", "tbank"), ("B.INVEST_TOKEN", "bcs")])
 def test_only_populated_prefix_selects_its_broker_without_prompt(key, expected, monkeypatch):
     monkeypatch.setenv(key, " synthetic ")
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("single broker prompted"))

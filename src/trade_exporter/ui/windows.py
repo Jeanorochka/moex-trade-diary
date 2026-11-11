@@ -141,9 +141,6 @@ class ExportWindow(_JobWindow):
         navigation = QVBoxLayout(rail)
         navigation.setContentsMargins(18, 24, 18, 20)
         navigation.setSpacing(10)
-        mark = label("↗", "Heading")
-        mark.setStyleSheet("color: #C5B8FF; font-size: 32px;")
-        navigation.addWidget(mark)
         navigation.addWidget(label("Расширенный\nброкерский отчет", "Section", True))
         navigation.addSpacing(22)
         export_nav = button("Выгрузка", lambda: None)
@@ -156,8 +153,6 @@ class ExportWindow(_JobWindow):
         self.analysis_button.setObjectName("Nav")
         navigation.addWidget(self.analysis_button)
         navigation.addStretch()
-        navigation.addWidget(label("Финам · Т-Банк", "Muted"))
-        navigation.addWidget(label("Excel и JSON", "Muted"))
         shell.addWidget(rail)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -258,6 +253,7 @@ class ExportWindow(_JobWindow):
         body.addStretch()
         shell.addWidget(scroll, 1)
         self.controls = [self.broker_box, self.account_box, self.load_button, self.first, self.last, self.capital, self.output, self.folder_button, self.cash_flow_mode, self.start_button]
+        self._broker_changed()
         self._cash_flow_mode_changed()
         if config_error:
             self._error(config_error)
@@ -265,6 +261,8 @@ class ExportWindow(_JobWindow):
     def _broker_changed(self):
         self.accounts = []
         self.account_box.clear()
+        auto_label = "Данные о движениях недоступны" if self.broker_box.currentData() == "bcs" else "Из данных брокера"
+        self.cash_flow_mode.setItemText(0, auto_label)
 
     def _cash_flow_mode_changed(self):
         manual = self.cash_flow_mode.currentData() == "manual"
@@ -304,7 +302,7 @@ class ExportWindow(_JobWindow):
     def _load_accounts(self):
         name = self.broker_box.currentData()
         if not name:
-            self._error("Выберите Финам или Т-Банк.")
+            self._error("Выберите брокера.")
             return
         self._broker_changed()
         self._job(gui.load_accounts_worker, (self.root_dir, name))

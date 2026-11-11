@@ -11,12 +11,10 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from trade_exporter import cli
-from trade_exporter.brokers.registry import create_broker
+from trade_exporter.brokers.registry import BROKER_NAMES as BROKERS, TOKEN_ENVS, create_broker
 from trade_exporter.config import load_config
 
 
-BROKERS = {"finam": "Финам", "tbank": "Т-Банк"}
-TOKEN_ENVS = {"finam": "F.INVEST_TOKEN", "tbank": "T.INVEST_TOKEN"}
 CASH_FLOW_KINDS = {"deposit": "Пополнение", "withdrawal": "Вывод"}
 
 
@@ -67,7 +65,7 @@ def build_export_args(
 ) -> list[str]:
     broker = str(broker).strip().lower()
     if broker not in BROKERS:
-        raise ValueError("Выберите брокера: Финам или Т-Банк.")
+        raise ValueError("Выберите брокера.")
     account_id = str(account_id or "").strip()
     if not account_id:
         raise ValueError("Сначала загрузите и выберите счёт.")

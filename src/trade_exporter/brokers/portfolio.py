@@ -314,6 +314,8 @@ def load_portfolio(broker, account, captured_at=None) -> PortfolioSnapshot:
         return _finam_portfolio(broker, account, captured_at)
     if broker.name == "tbank":
         return _tbank_portfolio(broker, account, captured_at)
+    if broker.name == "bcs":
+        return broker.get_portfolio_snapshot(account.id, captured_at)
     raise ValueError(f"Портфель брокера {broker.name!r} не поддерживается")
 
 
@@ -500,6 +502,8 @@ def _tbank_flow(item: dict, base: str, reasons: list[str]) -> CashFlow:
 
 def load_cash_flows(broker, account, start, end, *, require_inception=True) -> CashFlowHistory:
     end = _utc(end, "end")
+    if broker.name == "bcs":
+        return CashFlowHistory((), False, ("Для БКС пополнения и выводы можно указать вручную.",), None)
     if broker.name not in {"finam", "tbank"}:
         raise ValueError(f"Потоки брокера {broker.name!r} не поддерживаются")
     if account.opened_at is None and require_inception:

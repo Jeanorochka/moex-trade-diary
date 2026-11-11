@@ -174,3 +174,12 @@ def test_manual_flow_dates_sort_chronologically(window):
     ]
     window._refresh_flows()
     assert window.flow_model.rows[0][0] == date(2026, 2, 20)
+
+
+def test_export_sidebar_and_bcs_choice(window):
+    from PySide6.QtWidgets import QLabel
+
+    labels = {widget.text() for widget in window.findChildren(QLabel)}
+    assert "Расширенный\nброкерский отчет" in labels
+    assert labels.isdisjoint({"↗", "Финам · Т-Банк", "Excel и JSON"})
+    assert window.broker_box.itemText(window.broker_box.findData("bcs")) == "БКС"
