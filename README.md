@@ -11,9 +11,9 @@ v. 2.2   - переоценка портфеля, денежные потоки,
 v. 3.0   - теперь открывает Tkinter интерфейс для выгрузки<br>
 [v. 4.0](https://github.com/Jeanorochka/moex-trade-diary/releases/tag/prod)   - теперь выводит чистый отчет, + Qt интерфейс у окошка вместо Tkinter
 
-<img width="977" height="762" alt="image" src="https://github.com/user-attachments/assets/c24b72b7-8082-475b-87cc-89910f17a289" />
+<img width="977" height="762" alt="Скриншот" src="https://github.com/user-attachments/assets/0116826e-df95-4ed3-84ed-5b66e7ae314a" />
 
-Доступны Финам и Т-Банк
+На текущий момент доступны Финам, Т-Банк и БКС.
 
 ## Запуск
 
