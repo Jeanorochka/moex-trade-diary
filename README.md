@@ -24,6 +24,7 @@ uv sync --locked
 ```dotenv
 F.INVEST_TOKEN=токен_финама
 T.INVEST_TOKEN=токен_тбанка
+B.INVEST_TOKEN=токен_бкс
 ```
 
 ```bash
