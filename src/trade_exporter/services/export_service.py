@@ -154,6 +154,8 @@ class ExportTradeHistory:
         return path, selected
 
     def _history_start(self, account: Account, period_from: datetime) -> datetime:
-        if self.reconstruction_mode == "full" and account.opened_at is not None:
-            return account.opened_at.astimezone(period_from.tzinfo)
+        if self.reconstruction_mode == "full":
+            earliest = account.opened_at or getattr(self.broker, "trade_history_start", None)
+            if earliest is not None:
+                return earliest.astimezone(period_from.tzinfo)
         return period_from - timedelta(days=self.lookback_days)

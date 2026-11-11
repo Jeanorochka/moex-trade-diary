@@ -159,3 +159,14 @@ def test_single_dollar_currency_without_portfolio_is_reported_as_dollars():
     assert report.summary["excluded_instruments"] == []
     assert report.summary["result_quality"] == []
     assert next(row for row in report.summary["risk"]["metrics"] if row["metric"] == "proxy_net_pnl")["unit"] == "USD"
+
+
+def test_full_reconstruction_uses_available_bcs_history_for_undated_account():
+    from trade_exporter.brokers.bcs import HISTORY_START
+    from types import SimpleNamespace
+
+    broker = SimpleNamespace(name="bcs", trade_history_start=HISTORY_START)
+    account = Account(id="123", name="БКС", broker="bcs")
+    period = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    use_case = ExportTradeHistory(broker, None, None, "full", 30, timezone.utc)
+    assert use_case._history_start(account, period) == HISTORY_START

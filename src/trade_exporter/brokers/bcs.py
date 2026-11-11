@@ -48,6 +48,7 @@ def _utc(value: datetime) -> datetime:
 
 class BcsBroker(BrokerAdapter):
     name = "bcs"
+    trade_history_start = HISTORY_START
     AUTH = "trade-api-keycloak/realms/tradeapi/protocol/openid-connect/token"
     PORTFOLIO = "trade-api-bff-portfolio/api/v1/portfolio"
     TRADES = "trade-api-bff-trade-details/api/v1/trades/search"
@@ -194,7 +195,7 @@ class BcsBroker(BrokerAdapter):
         self._check_account(account_id)
         first, end = _utc(date_from), _utc(date_to)
         reasons = []
-        if first < HISTORY_START:
+        if first <= HISTORY_START:
             reasons.append("БКС отдаёт сделки с 26.01.2026; предыдущие входы в позиции могут отсутствовать.")
         self.fill_quality = tuple(reasons)
         self.commission_quality = (
