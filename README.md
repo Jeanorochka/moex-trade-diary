@@ -10,6 +10,7 @@ v. 2.1.1 - добавлен Финам брокер + расширенная п�
 v. 2.2   - переоценка портфеля, денежные потоки, доходность<br>
 v. 3.0   - теперь открывает Tkinter интерфейс для выгрузки<br>
 [v. 4.0](https://github.com/Jeanorochka/moex-trade-diary/releases/tag/prod)   - теперь выводит чистый отчет, + Qt интерфейс у окошка вместо Tkinter
+[v. 5.0](https://github.com/Jeanorochka/moex-trade-diary/releases/tag/v.5) - добавлены исполняемые файлы, убран мусор из интерфейса, добавлена поддержка БКС.
 
 <img width="977" height="762" alt="Скриншот" src="https://github.com/user-attachments/assets/0116826e-df95-4ed3-84ed-5b66e7ae314a" />
 
