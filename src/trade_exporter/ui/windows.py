@@ -26,7 +26,7 @@ def _date_edit(day):
     widget.setCalendarPopup(True)
     widget.setDisplayFormat("dd.MM.yyyy")
     widget.setLocale(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
-    return widget
+    return widget #
 
 
 def _field(text, widget):
