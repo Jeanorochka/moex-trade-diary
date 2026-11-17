@@ -227,6 +227,85 @@ class _WindowResizeHandle(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class _BrokerTokensDialog(QDialog):
+    save_requested = Signal(object)
+    skip_requested = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.first_launch = False
+        self.requested_broker = None
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setWindowTitle("Токены брокеров")
+        self.setMinimumWidth(440)
+        self.setObjectName("BrokerTokensDialog")
+        self.setStyleSheet("QDialog#BrokerTokensDialog { border: 1px solid #34394B; }")
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(1, 1, 1, 1)
+        shell.setSpacing(0)
+        shell.addWidget(_WindowBar(self, state_controls=False))
+        content = QWidget()
+        shell.addWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        layout.addWidget(label("Вставьте API-токен своего брокера. Для анализа готового файла токен не нужен.", "Muted", True))
+        form = QFormLayout()
+        self.fields = {}
+        for name, title in gui.BROKERS.items():
+            field = QLineEdit()
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText("Вставьте API токен")
+            self.fields[name] = field
+            form.addRow(title, field)
+        layout.addLayout(form)
+        self.error = label("", "Error", True)
+        layout.addWidget(self.error)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.cancel_button = button("Отмена", self._cancel)
+        actions.addWidget(self.cancel_button)
+        save_button = button("Сохранить", self._request_save, True)
+        save_button.setDefault(True)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def open_settings(self, tokens, *, first_launch, broker, read_failed):
+        self.first_launch = first_launch
+        self.requested_broker = broker
+        self.cancel_button.setText("Пропустить" if first_launch else "Отмена")
+        for name, field in self.fields.items():
+            field.setText(tokens.get(name, ""))
+        self.error.setText("Не удалось прочитать сохранённые токены. Их можно ввести заново.")
+        self.error.setVisible(read_failed)
+        self.open()
+        self.fields[broker or next(iter(self.fields))].setFocus()
+
+    def show_save_error(self):
+        self.error.setText("Не удалось сохранить токены для этого пользователя.")
+        self.error.show()
+
+    def clear_fields(self):
+        for field in self.fields.values():
+            field.clear()
+
+    @Slot()
+    def _request_save(self):
+        tokens = {
+            name: value for name, field in self.fields.items()
+            if (value := field.text().strip())
+        }
+        self.save_requested.emit(tokens)
+
+    @Slot()
+    def _cancel(self):
+        if self.first_launch:
+            self.skip_requested.emit()
+        else:
+            self.reject()
+
+
 class _Task(QThread):
     event = Signal(str, object)
 
@@ -349,7 +428,7 @@ class ExportWindow(_JobWindow):
         self.analysis_window = None
         self.result_path = None
         self.setWindowTitle(TITLE)
-        self.resize(1000, 780)
+        self.resize(1000, 700)
         self.setMinimumSize(860, 640)
         config_error = None
         try:
@@ -362,7 +441,7 @@ class ExportWindow(_JobWindow):
         self.tokens = gui.configured_tokens(config)
         self.tokens_saved = False
         self.token_read_failed = False
-        self.token_dialog = None
+        self._token_settings_dialog = None
         try:
             if self.token_path.is_file():
                 self.tokens = load_tokens(self.token_path)
@@ -405,11 +484,14 @@ class ExportWindow(_JobWindow):
         content.setObjectName("Content")
         scroll.setWidget(content)
         body = QVBoxLayout(content)
-        body.setContentsMargins(22, 20, 22, 20)
+        body.setContentsMargins(22, 8, 22, 12)
         body.setSpacing(14)
-        header = QHBoxLayout()
-        header.addWidget(label("БРОКЕРСКИЙ ОТЧЁТ", "Eyebrow"))
-        header.addStretch()
+        header = QGridLayout()
+        header.setHorizontalSpacing(0)
+        header.setColumnStretch(1, 1)
+        heading = label("Выгрузка и аналитика", "Heading")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(heading, 0, 1)
         self.settings_button = button("", self._show_token_settings)
         self.settings_button.setObjectName("TokenSettings")
         self.settings_button.setAccessibleName("Настройки токенов")
@@ -418,9 +500,9 @@ class ExportWindow(_JobWindow):
         self.settings_button.setIcon(_settings_icon(icon_size))
         self.settings_button.setIconSize(icon_size)
         self.settings_button.setFixedSize(32, 32)
-        header.addWidget(self.settings_button)
+        header.setColumnMinimumWidth(0, self.settings_button.width())
+        header.addWidget(self.settings_button, 0, 2)
         body.addLayout(header)
-        body.addWidget(label("Выгрузка и аналитика", "Heading"))
         body.addWidget(label("Выберите счёт и период", "Muted"))
         account_card, form = card("Параметры отчёта")
         self.broker_box = QComboBox()
@@ -483,6 +565,7 @@ class ExportWindow(_JobWindow):
         flows.addWidget(self.manual_panel)
         body.addWidget(flow_card)
         footer, footer_layout = card()
+        footer_layout.setContentsMargins(18, 13, 18, 12)
         self.start_button = button("Выгрузить и рассчитать", self._start, True)
         footer_layout.addWidget(self.start_button)
         self.progress = QProgressBar()
@@ -520,93 +603,65 @@ class ExportWindow(_JobWindow):
     def _show_token_settings(self):
         self._token_settings()
 
+    @property
+    def token_dialog(self):
+        dialog = self._token_settings_dialog
+        return dialog if dialog is not None and dialog.isVisible() else None
+
     def _token_settings(self, *, first_launch=False, broker=None):
-        if self.token_dialog is not None:
-            self.token_dialog.activateWindow()
+        dialog = self._token_settings_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.activateWindow()
             return
-        dialog = QDialog(self)
-        self.token_dialog = dialog
-        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint)
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dialog.finished.connect(self._token_dialog_closed)
-        dialog.setWindowTitle("Токены брокеров")
-        dialog.setMinimumWidth(440)
-        dialog.setObjectName("BrokerTokensDialog")
-        dialog.setStyleSheet("QDialog#BrokerTokensDialog { border: 1px solid #34394B; }")
-        shell = QVBoxLayout(dialog)
-        shell.setContentsMargins(1, 1, 1, 1)
-        shell.setSpacing(0)
-        shell.addWidget(_WindowBar(dialog, state_controls=False))
-        content = QWidget()
-        shell.addWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
-        layout.addWidget(label("Вставьте API-токен своего брокера. Для анализа готового файла токен не нужен.", "Muted", True))
-        form = QFormLayout()
-        fields = {}
-        for name, title in gui.BROKERS.items():
-            field = QLineEdit(self.tokens.get(name, ""))
-            field.setEchoMode(QLineEdit.EchoMode.Password)
-            field.setPlaceholderText("Вставьте API токен")
-            fields[name] = field
-            form.addRow(title, field)
-        layout.addLayout(form)
-        error = label("Не удалось прочитать сохранённые токены. Их можно ввести заново.", "Error", True)
-        error.setVisible(self.token_read_failed)
-        layout.addWidget(error)
+        if dialog is None:
+            dialog = _BrokerTokensDialog(self)
+            dialog.save_requested.connect(self._save_token_settings)
+            dialog.skip_requested.connect(self._skip_token_setup)
+            dialog.finished.connect(self._token_dialog_closed)
+            self._token_settings_dialog = dialog
+        dialog.open_settings(
+            self.tokens, first_launch=first_launch, broker=broker, read_failed=self.token_read_failed,
+        )
 
-        def persist():
-            values = {name: field.text().strip() for name, field in fields.items()}
-            tokens = {name: value for name, value in values.items() if value}
+    @Slot(object)
+    def _save_token_settings(self, tokens):
+        dialog = self.token_dialog
+        requested_broker = dialog.requested_broker
+        try:
+            save_tokens(self.token_path, tokens)
+        except (OSError, ValueError):
+            dialog.show_save_error()
+            return
+        current = self.broker_box.currentData()
+        changed = self.tokens.get(current) != tokens.get(current)
+        self.tokens = tokens
+        self.tokens_saved = True
+        self.token_read_failed = False
+        if changed:
+            self._broker_changed()
+        selected = self._single_token_broker()
+        if selected and not self.tokens.get(current):
+            self.broker_box.setCurrentIndex(self.broker_box.findData(selected))
+        self.message.hide()
+        if not self.accounts:
+            self.status.setText("Выберите брокера и загрузите счета.")
+        dialog.accept()
+        if requested_broker and self.tokens.get(self.broker_box.currentData()):
+            self._load_accounts()
+
+    @Slot()
+    def _skip_token_setup(self):
+        if not self.token_read_failed:
             try:
-                save_tokens(self.token_path, tokens)
-            except (OSError, ValueError):
-                error.setText("Не удалось сохранить токены для этого пользователя.")
-                error.show()
-                return
-            current = self.broker_box.currentData()
-            changed = self.tokens.get(current) != tokens.get(current)
-            self.tokens = tokens
-            self.tokens_saved = True
-            self.token_read_failed = False
-            if changed:
-                self._broker_changed()
-            selected = self._single_token_broker()
-            if selected and not self.tokens.get(current):
-                self.broker_box.setCurrentIndex(self.broker_box.findData(selected))
-            self.message.hide()
-            if not self.accounts:
-                self.status.setText("Выберите брокера и загрузите счета.")
-            dialog.accept()
-            if broker and self.tokens.get(self.broker_box.currentData()):
-                self._load_accounts()
-
-        def skip_setup():
-            if not self.token_read_failed:
-                try:
-                    save_tokens(self.token_path, {})
-                    self.tokens_saved = True
-                except OSError:
-                    pass
-            dialog.reject()
-
-        actions = QHBoxLayout()
-        actions.addStretch()
-        if first_launch:
-            actions.addWidget(button("Пропустить", skip_setup))
-        else:
-            actions.addWidget(button("Отмена", dialog.reject))
-        save_button = button("Сохранить", persist, True)
-        save_button.setDefault(True)
-        actions.addWidget(save_button)
-        layout.addLayout(actions)
-        fields[broker or next(iter(fields))].setFocus()
-        dialog.open()
+                save_tokens(self.token_path, {})
+                self.tokens_saved = True
+            except OSError:
+                pass
+        self.token_dialog.reject()
 
     @Slot(int)
     def _token_dialog_closed(self, _result):
-        self.token_dialog = None
+        self._token_settings_dialog.clear_fields()
 
     def _broker_changed(self):
         self.accounts = []
