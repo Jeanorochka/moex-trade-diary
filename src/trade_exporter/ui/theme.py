@@ -47,6 +47,9 @@ QPushButton#Primary:disabled { background: #483F66; border-color: #483F66; color
 QPushButton#Nav { text-align: left; background: transparent; color: #B7B3CF; border: none; padding: 11px 12px; border-radius: 8px; }
 QPushButton#Nav:hover { background: #292635; color: #FFFFFF; }
 QPushButton#Nav:checked { background: #39304E; color: #EDE7FF; }
+QPushButton#TokenSettings { background: transparent; border: 1px solid transparent; padding: 0; }
+QPushButton#TokenSettings:hover, QPushButton#TokenSettings:focus { background: #302431; border-color: #765268; }
+QPushButton#TokenSettings:pressed { background: #3B293B; }
 QProgressBar { border: none; background: #343047; border-radius: 3px; min-height: 5px; max-height: 5px; }
 QProgressBar::chunk { background: #AF9CF5; border-radius: 3px; }
 QTableView, QTableWidget { background: #202330; alternate-background-color: #252A38; border: 1px solid #34394B; border-radius: 7px; gridline-color: #303647; selection-background-color: #483D68; selection-color: #FFFFFF; }

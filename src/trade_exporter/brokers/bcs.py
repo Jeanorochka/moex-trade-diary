@@ -59,7 +59,7 @@ class BcsBroker(BrokerAdapter):
         if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.query or endpoint.fragment:
             raise ValueError("БКС: base_url должен быть HTTPS-адресом API")
         token_env = str(settings.get("token_env", "B.INVEST_TOKEN"))
-        self.token = os.getenv(token_env, "").strip()
+        self.token = str(settings.get("token") or os.getenv(token_env, "")).strip()
         if not self.token:
             raise RuntimeError(f"БКС: укажите refresh-токен для чтения в {token_env} в окружении или .env.")
         self.configured_account = str(settings.get("account_id") or "").strip()

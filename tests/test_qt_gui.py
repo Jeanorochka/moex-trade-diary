@@ -5,7 +5,7 @@ from time import monotonic
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QPushButton
 import pytest
 
 from trade_exporter import gui
@@ -26,8 +26,8 @@ def app():
 
 @pytest.fixture
 def window(app, tmp_path, monkeypatch):
-    monkeypatch.setattr(gui, "_read_config", lambda root: {})
-    widget = ExportWindow(tmp_path)
+    monkeypatch.setattr(gui, "_read_config", lambda root: {"finam": {"token": "test-token"}})
+    widget = ExportWindow(tmp_path, token_path=tmp_path / "credentials" / "tokens.dat")
     yield widget
     assert not widget.busy
     widget.close()
@@ -41,6 +41,79 @@ def finish(window, app):
         QTest.qWait(5)
     app.processEvents()
     assert window.task is None and not window.busy
+
+
+def visit_token_dialog(window, open_dialog, button_text, edits=None):
+    open_dialog()
+    dialog = window.token_dialog
+    assert dialog is not None and dialog.isVisible()
+    fields = dialog.findChildren(QLineEdit)
+    received = {
+        "title": dialog.windowTitle(),
+        "fields": [(field.text(), field.echoMode()) for field in fields],
+    }
+    for index, value in (edits or {}).items():
+        fields[index].setText(value)
+    next(widget for widget in dialog.findChildren(QPushButton) if widget.text() == button_text).click()
+    assert window.token_dialog is None
+    return received
+
+
+def test_first_launch_and_gear_save_replace_and_remove_tokens(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "_read_config", lambda root: {})
+    monkeypatch.setattr(gui, "configured_tokens", lambda config: {})
+    path = tmp_path / "credentials" / "tokens.dat"
+    window = ExportWindow(tmp_path, token_path=path)
+    window.show()
+    try:
+        initial = visit_token_dialog(window, window.prompt_for_tokens, "Сохранить", {1: " tbank-old "})
+        assert initial == {"title": "Токены брокеров", "fields": [("", QLineEdit.EchoMode.Password)] * 3}
+        assert window.broker_box.currentData() == "tbank"
+        assert not (tmp_path / ".env").exists()
+        assert not window.settings_button.icon().isNull()
+        assert not window.settings_button.icon().pixmap(17, 17).isNull()
+        assert window.settings_button.x() > window.width() / 2
+        restored = ExportWindow(tmp_path, token_path=path)
+        restored.show()
+        try:
+            assert restored.tokens == {"tbank": "tbank-old"}
+            restored.accounts = [Account("account-1", "Счёт", "tbank")]
+            visit_token_dialog(restored, restored.settings_button.click, "Отмена", {1: "tbank-discarded"})
+            assert restored.accounts and restored.tokens == {"tbank": "tbank-old"}
+            visit_token_dialog(restored, restored.settings_button.click, "Сохранить", {1: "tbank-new"})
+            assert restored.tokens == {"tbank": "tbank-new"} and not restored.accounts
+            visit_token_dialog(restored, restored.settings_button.click, "Сохранить", {1: ""})
+            assert restored.tokens == {}
+        finally:
+            restored.close()
+        reopened = ExportWindow(tmp_path, token_path=path)
+        try:
+            assert reopened.tokens == {} and reopened.tokens_saved
+        finally:
+            reopened.close()
+    finally:
+        window.close()
+
+
+def test_first_launch_can_be_skipped_and_file_analysis_stays_available(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "_read_config", lambda root: {})
+    monkeypatch.setattr(gui, "configured_tokens", lambda config: {})
+    path = tmp_path / "credentials" / "tokens.dat"
+    window = ExportWindow(tmp_path, token_path=path)
+    window.show()
+    try:
+        visit_token_dialog(window, window.prompt_for_tokens, "Пропустить")
+        window.open_analysis()
+        assert window.analysis_window.isVisible()
+    finally:
+        window.close()
+    reopened = ExportWindow(tmp_path, token_path=path)
+    reopened.show()
+    try:
+        monkeypatch.setattr(reopened, "_token_settings", lambda **kwargs: pytest.fail("Prompt repeated after skip"))
+        reopened.prompt_for_tokens()
+    finally:
+        reopened.close()
 
 
 def test_manual_flows_preserve_draft_through_mode_switches_and_busy_state(window):

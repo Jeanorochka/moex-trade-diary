@@ -114,17 +114,23 @@ def build_export_args(
     ] + flow_arguments
 
 
-def initial_broker(config: dict, environment=None) -> str | None:
+def configured_tokens(config: dict, environment=None) -> dict[str, str]:
     environment = os.environ if environment is None else environment
-    candidates = []
+    tokens = {}
     for name in BROKERS:
         settings = config.get(name, {})
         key = str(settings.get("token_env", TOKEN_ENVS[name]))
         token = settings.get("token") if name == "finam" else None
-        if str(token or environment.get(key, "")).strip():
-            candidates.append(name)
-    if len(candidates) == 1:
-        return candidates[0]
+        token = str(token or environment.get(key, "")).strip()
+        if token:
+            tokens[name] = token
+    return tokens
+
+
+def initial_broker(config: dict, environment=None) -> str | None:
+    tokens = configured_tokens(config, environment)
+    if len(tokens) == 1:
+        return next(iter(tokens))
     configured = str(config.get("app", {}).get("broker", "auto")).strip().lower()
     return configured if configured in BROKERS else None
 
@@ -134,8 +140,8 @@ def _read_config(root_dir: Path) -> dict:
     return load_config(root_dir / "config.toml")
 
 
-def _secrets(config: dict, broker=None) -> tuple[str, ...]:
-    values = []
+def _secrets(config: dict, broker=None, *, token: str | None = None) -> tuple[str, ...]:
+    values = [token]
     for name in BROKERS:
         settings = config.get(name, {})
         key = str(settings.get("token_env", TOKEN_ENVS[name]))
@@ -175,49 +181,56 @@ class _LogWriter:
         self.buffer = ""
 
 
-def load_accounts_worker(root_dir: Path, broker_name: str, emit) -> None:
+def load_accounts_worker(root_dir: Path, broker_name: str, emit, *, token: str | None = None) -> None:
     config, broker = {}, None
     try:
         if broker_name not in BROKERS:
             raise ValueError("Выберите брокера.")
         config = _read_config(Path(root_dir))
         emit("progress", f"Загружаю счета: {BROKERS[broker_name]}…")
-        broker = create_broker(broker_name, dict(config.get(broker_name, {})))
+        settings = dict(config.get(broker_name, {}))
+        if token is not None:
+            settings["token"] = token
+        broker = create_broker(broker_name, settings)
         accounts = broker.list_accounts()
         if not accounts:
             raise RuntimeError("У выбранного брокера нет доступных счетов.")
         emit("accounts", (broker_name, accounts))
         emit("progress", f"Счета загружены: {len(accounts)}.")
     except (Exception, SystemExit) as error:
-        emit("error", _redact(error, _secrets(config, broker)))
+        emit("error", _redact(error, _secrets(config, broker, token=token)))
     finally:
         emit("idle", None)
 
 
-def export_worker(root_dir: Path, argv: list[str], emit, runner=None) -> None:
+def export_worker(root_dir: Path, argv: list[str], emit, runner=None, *, token: str | None = None) -> None:
     config = {}
     writer = None
     try:
         config = _read_config(Path(root_dir))
-        secrets = _secrets(config)
+        secrets = _secrets(config, token=token)
         writer = _LogWriter(emit, secrets)
         progress = lambda message: emit("progress", _redact(message, secrets))
         progress("Начинаю выгрузку и расчёт аналитики…")
+        run = runner or cli.main
         with redirect_stdout(writer), redirect_stderr(writer):
-            result = (runner or cli.main)(argv, progress=progress)
+            if token is None:
+                result = run(argv, progress=progress)
+            else:
+                result = run(argv, progress=progress, broker_token=token)
         writer.flush()
         emit("result", result)
     except (Exception, SystemExit) as error:
         if writer is not None:
             writer.flush()
-        emit("error", _redact(error, _secrets(config)))
+        emit("error", _redact(error, _secrets(config, token=token)))
     finally:
         emit("idle", None)
 
 
 def run_gui(root_dir: Path | None = None) -> None:
     try:
-        from PySide6.QtCore import QLocale
+        from PySide6.QtCore import QLocale, QTimer
         from PySide6.QtWidgets import QApplication
     except ImportError as error:
         raise RuntimeError("Установите зависимости интерфейса: uv sync --locked") from error
@@ -231,5 +244,6 @@ def run_gui(root_dir: Path | None = None) -> None:
     configure_app(application)
     application.report_window = ExportWindow(root_dir)
     application.report_window.show()
+    QTimer.singleShot(0, application.report_window.prompt_for_tokens)
     if existing is None:
         application.exec()

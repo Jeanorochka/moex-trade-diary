@@ -157,7 +157,7 @@ def print_portfolio(broker, account, output_dir, *, report=None, **options):
     return paths
 
 
-def main(argv=None, *, progress=None):
+def main(argv=None, *, progress=None, broker_token: str | None = None):
     status = progress or (lambda message: None)
     args = parse_args(argv)
     if args.analyze:
@@ -179,6 +179,8 @@ def main(argv=None, *, progress=None):
         if broker_name != "finam":
             raise ValueError("--token используется с --broker finam.")
         broker_settings["token"] = args.token
+    if broker_token is not None:
+        broker_settings["token"] = broker_token
     print(f"Брокер: {BROKER_NAMES[broker_name]}")
     status(f"Подключение: {BROKER_NAMES[broker_name]}")
     broker = create_broker(broker_name, broker_settings)

@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from trade_exporter import gui
+from trade_exporter import cli, gui
 from trade_exporter.domain.models import Account
 
 
@@ -152,6 +152,23 @@ def test_initial_broker_honors_custom_environment_and_explicit_finam_token():
     assert gui.initial_broker({"app": {"broker": "tbank"}}, {}) == "tbank"
 
 
+def test_configured_tokens_prefer_explicit_finam_token_and_respect_custom_environment():
+    config = {
+        "finam": {"token": " synthetic-saved-finam ", "token_env": "CUSTOM_FINAM"},
+        "bcs": {"token_env": "CUSTOM_BCS"},
+    }
+    environment = {
+        "CUSTOM_FINAM": "synthetic-legacy-finam",
+        "CUSTOM_BCS": " synthetic-custom-bcs ",
+        "T.INVEST_TOKEN": " ",
+        "B.INVEST_TOKEN": "synthetic-default-bcs",
+    }
+    assert gui.configured_tokens(config, environment) == {
+        "finam": "synthetic-saved-finam",
+        "bcs": "synthetic-custom-bcs",
+    }
+
+
 def test_dotenv_is_loaded_from_application_root(config, monkeypatch):
     calls = []
     monkeypatch.setattr(gui, "load_dotenv", lambda **options: calls.append(options))
@@ -190,6 +207,36 @@ def test_account_worker_redacts_initial_and_refreshed_tokens_on_failure(config, 
     assert events[-1] == ("idle", None)
 
 
+@pytest.mark.parametrize("name", ["finam", "tbank", "bcs"])
+def test_gui_workers_forward_the_current_token_to_adapter_settings_and_redact_errors(
+    config, monkeypatch, name,
+):
+    calls, events = [], []
+
+    def create_broker(broker_name, settings):
+        token = settings["token"]
+        calls.append((broker_name, token))
+        raise RuntimeError(f"Rejected {token}")
+
+    def emit(kind, value):
+        events.append((kind, value))
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "create_broker", create_broker)
+    monkeypatch.setattr(gui, "create_broker", create_broker)
+
+    argv = arguments(config, broker=name)
+    for token in ("synthetic-first-token", "synthetic-replacement-token"):
+        gui.load_accounts_worker(config.parent, name, emit, token=token)
+        gui.export_worker(config.parent, argv, emit, token=token)
+
+    assert calls == [
+        (name, "synthetic-first-token"), (name, "synthetic-first-token"),
+        (name, "synthetic-replacement-token"), (name, "synthetic-replacement-token"),
+    ]
+    assert [value for kind, value in events if kind == "error"] == ["Rejected ***"] * 4
+
+
 def test_export_worker_sends_real_progress_and_stdout_through_events(config, monkeypatch):
     events, calls = [], []
     argv = arguments(config)
@@ -211,16 +258,21 @@ def test_export_worker_sends_real_progress_and_stdout_through_events(config, mon
 
 def test_export_worker_redacts_split_output_progress_and_error_without_traceback(config):
     events = []
+    token = "synthetic-gui-token"
 
-    def run(values, *, progress):
+    def run(values, *, progress, broker_token):
+        assert broker_token == token
         sys.stdout.write("synthetic-finam-")
-        sys.stdout.write("secret\n")
-        progress("token=synthetic-tbank-secret")
-        raise RuntimeError("synthetic-finam-secret Bearer runtime-jwt eyJpayload.body.signature")
+        sys.stdout.write(f"secret {token}\n")
+        progress(f"tokens=synthetic-tbank-secret {token}")
+        raise RuntimeError(f"synthetic-finam-secret {token} Bearer runtime-jwt eyJpayload.body.signature")
 
-    gui.export_worker(config.parent, arguments(config), lambda kind, value: events.append((kind, value)), runner=run)
+    gui.export_worker(
+        config.parent, arguments(config), lambda kind, value: events.append((kind, value)),
+        runner=run, token=token,
+    )
     visible = "\n".join(str(value) for kind, value in events if kind in {"progress", "log", "error"})
-    for secret in ("synthetic-finam-secret", "synthetic-tbank-secret", "runtime-jwt", "eyJpayload.body.signature"):
+    for secret in (token, "synthetic-finam-secret", "synthetic-tbank-secret", "runtime-jwt", "eyJpayload.body.signature"):
         assert secret not in visible
     assert "Traceback" not in visible
     assert any(kind == "error" for kind, _ in events)

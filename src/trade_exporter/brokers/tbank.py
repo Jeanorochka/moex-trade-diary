@@ -51,7 +51,7 @@ class TBankBroker(BrokerAdapter):
         )
 
         token_env = str(settings.get("token_env", "T.INVEST_TOKEN"))
-        self.token = os.getenv(token_env, "").strip()
+        self.token = str(settings.get("token") or os.getenv(token_env, "")).strip()
         if not self.token:
             raise RuntimeError(
                 f"Не найден токен T-Bank. Укажи {token_env} в окружении или .env."

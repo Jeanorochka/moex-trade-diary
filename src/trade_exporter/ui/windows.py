@@ -1,18 +1,20 @@
 from datetime import datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QDate, QLocale, QThread, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate, QEvent, QLocale, QPoint, QSize, QStandardPaths, QThread, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QScrollArea,
+    QApplication, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QLineEdit, QMainWindow, QProgressBar, QScrollArea,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
 from trade_exporter import gui
 from trade_exporter.services.file_analysis import analysis_worker
+from trade_exporter.token_store import load_tokens, save_tokens
 from trade_exporter.ui.charts import AssetChart, ResultChart
 from trade_exporter.ui.tables import table
 from trade_exporter.ui.theme import INK, MUTED, TITLE, button, card, label, number, tone
@@ -46,6 +48,169 @@ def _row(*widgets):
     return frame
 
 
+def _window_icon(lines):
+    pixmap = QPixmap(32, 32)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(INK), 1.1))
+    for line in lines:
+        painter.drawLine(*line)
+    painter.end()
+    return QIcon(pixmap)
+
+
+class _WindowBar(QFrame):
+    def __init__(self, window, *, state_controls=True):
+        super().__init__()
+        self._press_position = None
+        self._drag_offset = None
+        self._manual_move = False
+        self.setObjectName("WindowBar")
+        self.setFixedHeight(32)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 1, 0)
+        layout.setSpacing(0)
+        layout.addStretch()
+
+        controls = []
+        self.maximize = None
+        if state_controls:
+            minimize = button("", window.showMinimized)
+            minimize.setIcon(_window_icon([(4, 10, 12, 10)]))
+            minimize.setAccessibleName("Свернуть")
+            minimize.setToolTip("Свернуть")
+            self.maximize = button("", self._toggle_maximum)
+            self._maximize_icon = _window_icon([
+                (4, 4, 12, 4), (12, 4, 12, 12), (12, 12, 4, 12), (4, 12, 4, 4),
+            ])
+            self._restore_icon = _window_icon([
+                (3, 6, 10, 6), (10, 6, 10, 13), (10, 13, 3, 13), (3, 13, 3, 6),
+                (6, 3, 13, 3), (13, 3, 13, 10), (13, 10, 11, 10), (6, 3, 6, 5),
+            ])
+            self.set_maximized(False)
+            controls.extend((minimize, self.maximize))
+        close = button("", window.close)
+        close.setIcon(_window_icon([(4, 4, 12, 12), (12, 4, 4, 12)]))
+        close.setAccessibleName("Закрыть")
+        close.setToolTip("Закрыть")
+        controls.append(close)
+
+        for control in controls:
+            control.setObjectName("WindowControl")
+            control.setFixedSize(38, 29)
+            control.setIconSize(QSize(16, 16))
+            control.setAutoDefault(False)
+            layout.addWidget(control)
+        close.setObjectName("WindowClose")
+        self.setStyleSheet("""
+            QFrame#WindowBar { background: #1D202C; }
+            QPushButton#WindowControl, QPushButton#WindowClose {
+                background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 0;
+            }
+            QPushButton#WindowControl:hover { background: #342C48; }
+            QPushButton#WindowControl:pressed { background: #483D63; }
+            QPushButton#WindowClose:hover { background: #5D2B43; }
+            QPushButton#WindowClose:pressed { background: #763850; }
+            QPushButton#WindowControl:focus, QPushButton#WindowClose:focus { border-color: #765E99; }
+        """)
+
+    def set_maximized(self, maximized):
+        name = "Восстановить" if maximized else "Развернуть"
+        self.maximize.setAccessibleName(name)
+        self.maximize.setToolTip(name)
+        self.maximize.setIcon(self._restore_icon if maximized else self._maximize_icon)
+
+    def _toggle_maximum(self):
+        window = self.window()
+        if window.isMaximized():
+            window.showNormal()
+        else:
+            window.showMaximized()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_position = event.globalPosition().toPoint()
+            self._drag_offset = self._press_position - self.window().frameGeometry().topLeft()
+            self._manual_move = False
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_position is None or not event.buttons() & Qt.MouseButton.LeftButton:
+            return
+        position = event.globalPosition().toPoint()
+        window = self.window()
+        if not self._manual_move:
+            if (position - self._press_position).manhattanLength() < QApplication.startDragDistance():
+                return
+            handle = window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                self._press_position = None
+                return
+            if window.isMaximized():
+                horizontal_ratio = self._drag_offset.x() / window.width()
+                window.showNormal()
+                self._drag_offset = QPoint(round(window.width() * horizontal_ratio), self._drag_offset.y())
+            self._manual_move = True
+        window.move(position - self._drag_offset)
+
+    def mouseReleaseEvent(self, event):
+        self._press_position = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.maximize is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._press_position = None
+            self._toggle_maximum()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+
+class _WindowResizeHandle(QWidget):
+    def __init__(self, edges, cursor):
+        super().__init__()
+        self.edges = edges
+        self.setCursor(cursor)
+        self._start = None
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        window = self.window()
+        handle = window.windowHandle()
+        if handle is None or not handle.startSystemResize(self.edges):
+            self._start = (event.globalPosition().toPoint(), window.geometry())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._start is None or not event.buttons() & Qt.MouseButton.LeftButton:
+            return
+        start, geometry = self._start
+        delta = event.globalPosition().toPoint() - start
+        window = self.window()
+        edge = Qt.Edge
+        left = bool(self.edges & edge.LeftEdge)
+        top = bool(self.edges & edge.TopEdge)
+        horizontal = delta.x() if self.edges & (edge.LeftEdge | edge.RightEdge) else 0
+        vertical = delta.y() if self.edges & (edge.TopEdge | edge.BottomEdge) else 0
+        width = geometry.width() + (-horizontal if left else horizontal)
+        height = geometry.height() + (-vertical if top else vertical)
+        width = max(window.minimumWidth(), min(width, window.maximumWidth()))
+        height = max(window.minimumHeight(), min(height, window.maximumHeight()))
+        x = geometry.x() + (geometry.width() - width if left else 0)
+        y = geometry.y() + (geometry.height() - height if top else 0)
+        window.setGeometry(x, y, width, height)
+
+    def mouseReleaseEvent(self, event):
+        self._start = None
+        super().mouseReleaseEvent(event)
+
+
 class _Task(QThread):
     event = Signal(str, object)
 
@@ -63,9 +228,57 @@ class _Task(QThread):
 class _JobWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._window_bar = None
+        self._resize_handles = []
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.task = None
         self.busy = False
         self.succeeded = False
+
+    def _set_window_content(self, content):
+        frame = QWidget()
+        grid = QGridLayout(frame)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        grid.setRowStretch(1, 1)
+        grid.setColumnStretch(1, 1)
+
+        edge, cursor = Qt.Edge, Qt.CursorShape
+        for row, column, edges, shape in (
+            (0, 0, edge.TopEdge | edge.LeftEdge, cursor.SizeFDiagCursor),
+            (0, 1, edge.TopEdge, cursor.SizeVerCursor),
+            (0, 2, edge.TopEdge | edge.RightEdge, cursor.SizeBDiagCursor),
+            (1, 0, edge.LeftEdge, cursor.SizeHorCursor),
+            (1, 2, edge.RightEdge, cursor.SizeHorCursor),
+            (2, 0, edge.BottomEdge | edge.LeftEdge, cursor.SizeBDiagCursor),
+            (2, 1, edge.BottomEdge, cursor.SizeVerCursor),
+            (2, 2, edge.BottomEdge | edge.RightEdge, cursor.SizeFDiagCursor),
+        ):
+            handle = _WindowResizeHandle(edges, shape)
+            if row != 1:
+                handle.setFixedHeight(5)
+            if column != 1:
+                handle.setFixedWidth(5)
+            grid.addWidget(handle, row, column)
+            self._resize_handles.append(handle)
+
+        panel = QWidget()
+        body = QVBoxLayout(panel)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        self._window_bar = _WindowBar(self)
+        body.addWidget(self._window_bar)
+        body.addWidget(content, 1)
+        grid.addWidget(panel, 1, 1)
+        self.setCentralWidget(frame)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and getattr(self, "_window_bar", None) is not None:
+            maximized = self.isMaximized()
+            self._window_bar.set_maximized(maximized)
+            for handle in self._resize_handles:
+                handle.setVisible(not (maximized or self.isFullScreen()))
 
     def _job(self, function, arguments):
         if self.task is not None:
@@ -108,10 +321,14 @@ class _JobWindow(QMainWindow):
 
 
 class ExportWindow(_JobWindow):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, *, token_path=None):
         super().__init__()
         self.root_dir = Path(root_dir).resolve()
         self.config_path = self.root_dir / "config.toml"
+        self.token_path = Path(token_path) if token_path is not None else (
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation))
+            / "moex-trade-diary" / "credentials" / "broker-tokens.dat"
+        )
         self.accounts, self.cash_flows = [], []
         self.analysis_window = None
         self.result_path = None
@@ -126,12 +343,24 @@ class ExportWindow(_JobWindow):
             config, self.timezone = {}, ZoneInfo("Europe/Moscow")
             config_error = gui._redact(error, gui._secrets({}))
         today = datetime.now(self.timezone).date()
-        selected = gui.initial_broker(config)
+        self.tokens = gui.configured_tokens(config)
+        self.tokens_saved = False
+        self.token_read_failed = False
+        self.token_dialog = None
+        try:
+            if self.token_path.is_file():
+                self.tokens = load_tokens(self.token_path)
+                self.tokens_saved = True
+        except (OSError, ValueError):
+            self.token_read_failed = True
+        selected = self._single_token_broker()
+        if selected is None:
+            selected = str(config.get("app", {}).get("broker", "auto")).strip().lower()
         destination = Path(str(config.get("app", {}).get("output_dir", "exports")))
         if not destination.is_absolute():
             destination = self.root_dir / destination
         central = QWidget()
-        self.setCentralWidget(central)
+        self._set_window_content(central)
         shell = QHBoxLayout(central)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
@@ -162,7 +391,18 @@ class ExportWindow(_JobWindow):
         body = QVBoxLayout(content)
         body.setContentsMargins(22, 20, 22, 20)
         body.setSpacing(14)
-        body.addWidget(label("БРОКЕРСКИЙ ОТЧЁТ", "Eyebrow"))
+        header = QHBoxLayout()
+        header.addWidget(label("БРОКЕРСКИЙ ОТЧЁТ", "Eyebrow"))
+        header.addStretch()
+        self.settings_button = button("", self._show_token_settings)
+        self.settings_button.setObjectName("TokenSettings")
+        self.settings_button.setAccessibleName("Настройки токенов")
+        self.settings_button.setToolTip("Настройки токенов")
+        self.settings_button.setIcon(QIcon(str(Path(__file__).parent / "icons" / "settings.svg")))
+        self.settings_button.setIconSize(QSize(17, 17))
+        self.settings_button.setFixedSize(32, 32)
+        header.addWidget(self.settings_button)
+        body.addLayout(header)
         body.addWidget(label("Выгрузка и аналитика", "Heading"))
         body.addWidget(label("Выберите счёт и период", "Muted"))
         account_card, form = card("Параметры отчёта")
@@ -241,22 +481,115 @@ class ExportWindow(_JobWindow):
         self.result_buttons = _row(button("Открыть Excel", self._open_result), button("Посмотреть аналитику", self._analyze_result))
         self.result_buttons.hide()
         footer_layout.addWidget(self.result_buttons)
-        self.details_button = button("Подробности", self._toggle_log)
-        footer_layout.addWidget(self.details_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(200)
-        self.log.setFixedHeight(110)
-        self.log.hide()
-        footer_layout.addWidget(self.log)
         body.addWidget(footer)
         body.addStretch()
         shell.addWidget(scroll, 1)
         self.controls = [self.broker_box, self.account_box, self.load_button, self.first, self.last, self.capital, self.output, self.folder_button, self.cash_flow_mode, self.start_button]
+        self.controls.append(self.settings_button)
         self._broker_changed()
         self._cash_flow_mode_changed()
         if config_error:
             self._error(config_error)
+
+    def _single_token_broker(self):
+        configured = [name for name in gui.BROKERS if self.tokens.get(name)]
+        return configured[0] if len(configured) == 1 else None
+
+    def prompt_for_tokens(self):
+        if self.isVisible() and (self.token_read_failed or (not self.tokens_saved and not self.tokens)):
+            self._token_settings(first_launch=True)
+
+    @Slot()
+    def _show_token_settings(self):
+        self._token_settings()
+
+    def _token_settings(self, *, first_launch=False, broker=None):
+        if self.token_dialog is not None:
+            self.token_dialog.activateWindow()
+            return
+        dialog = QDialog(self)
+        self.token_dialog = dialog
+        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.finished.connect(self._token_dialog_closed)
+        dialog.setWindowTitle("Токены брокеров")
+        dialog.setMinimumWidth(440)
+        dialog.setObjectName("BrokerTokensDialog")
+        dialog.setStyleSheet("QDialog#BrokerTokensDialog { border: 1px solid #34394B; }")
+        shell = QVBoxLayout(dialog)
+        shell.setContentsMargins(1, 1, 1, 1)
+        shell.setSpacing(0)
+        shell.addWidget(_WindowBar(dialog, state_controls=False))
+        content = QWidget()
+        shell.addWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        layout.addWidget(label("Вставьте API-токен своего брокера. Для анализа готового файла токен не нужен.", "Muted", True))
+        form = QFormLayout()
+        fields = {}
+        for name, title in gui.BROKERS.items():
+            field = QLineEdit(self.tokens.get(name, ""))
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText("Вставьте API токен")
+            fields[name] = field
+            form.addRow(title, field)
+        layout.addLayout(form)
+        error = label("Не удалось прочитать сохранённые токены. Их можно ввести заново.", "Error", True)
+        error.setVisible(self.token_read_failed)
+        layout.addWidget(error)
+
+        def persist():
+            values = {name: field.text().strip() for name, field in fields.items()}
+            tokens = {name: value for name, value in values.items() if value}
+            try:
+                save_tokens(self.token_path, tokens)
+            except (OSError, ValueError):
+                error.setText("Не удалось сохранить токены для этого пользователя.")
+                error.show()
+                return
+            current = self.broker_box.currentData()
+            changed = self.tokens.get(current) != tokens.get(current)
+            self.tokens = tokens
+            self.tokens_saved = True
+            self.token_read_failed = False
+            if changed:
+                self._broker_changed()
+            selected = self._single_token_broker()
+            if selected and not self.tokens.get(current):
+                self.broker_box.setCurrentIndex(self.broker_box.findData(selected))
+            self.message.hide()
+            if not self.accounts:
+                self.status.setText("Выберите брокера и загрузите счета.")
+            dialog.accept()
+            if broker and self.tokens.get(self.broker_box.currentData()):
+                self._load_accounts()
+
+        def skip_setup():
+            if not self.token_read_failed:
+                try:
+                    save_tokens(self.token_path, {})
+                    self.tokens_saved = True
+                except OSError:
+                    pass
+            dialog.reject()
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        if first_launch:
+            actions.addWidget(button("Пропустить", skip_setup))
+        else:
+            actions.addWidget(button("Отмена", dialog.reject))
+        save_button = button("Сохранить", persist, True)
+        save_button.setDefault(True)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+        fields[broker or next(iter(fields))].setFocus()
+        dialog.open()
+
+    @Slot(int)
+    def _token_dialog_closed(self, _result):
+        self.token_dialog = None
 
     def _broker_changed(self):
         self.accounts = []
@@ -304,8 +637,12 @@ class ExportWindow(_JobWindow):
         if not name:
             self._error("Выберите брокера.")
             return
+        if not self.tokens.get(name):
+            self._token_settings(broker=name)
+            return
         self._broker_changed()
-        self._job(gui.load_accounts_worker, (self.root_dir, name))
+        worker = partial(gui.load_accounts_worker, token=self.tokens[name]) if self.tokens_saved else gui.load_accounts_worker
+        self._job(worker, (self.root_dir, name))
 
     def _choose_folder(self):
         chosen = QFileDialog.getExistingDirectory(self, "Папка результатов", self.output.text())
@@ -313,6 +650,7 @@ class ExportWindow(_JobWindow):
             self.output.setText(chosen)
 
     def _start(self):
+        name = self.broker_box.currentData()
         index = self.account_box.currentIndex()
         account_id = self.accounts[index].id if 0 <= index < len(self.accounts) else ""
         try:
@@ -320,8 +658,12 @@ class ExportWindow(_JobWindow):
         except ValueError as error:
             self._error(error)
             return
+        if self.tokens_saved and not self.tokens.get(name):
+            self._error("Добавьте токен брокера в настройках и загрузите счета.")
+            return
         self.result_buttons.hide()
-        self._job(gui.export_worker, (self.root_dir, argv))
+        worker = partial(gui.export_worker, token=self.tokens[name]) if self.tokens_saved else gui.export_worker
+        self._job(worker, (self.root_dir, argv))
 
     @Slot(str, object)
     def _receive(self, kind, value):
@@ -334,21 +676,15 @@ class ExportWindow(_JobWindow):
                 if accounts:
                     self.account_box.setCurrentIndex(0)
                 self.succeeded = True
-        elif kind in {"progress", "log"}:
-            self.log.appendPlainText(str(value))
-            if kind == "progress":
-                self.status.setText(str(value))
+        elif kind == "progress":
+            self.status.setText(str(value))
         elif kind == "error":
-            self.log.appendPlainText(str(value))
             self._error(value)
         elif kind == "result":
             self.result_path = Path(value[0] if isinstance(value, tuple) else value)
             self.succeeded = True
             self.status.setText("Готово. Отчёт сохранён в выбранной папке.")
             self.result_buttons.show()
-
-    def _toggle_log(self):
-        self.log.setVisible(self.log.isHidden())
 
     def _open_result(self):
         if self.result_path:
@@ -406,7 +742,7 @@ class AnalysisWindow(_JobWindow):
         self.resize(1060, 800)
         self.setMinimumSize(860, 660)
         central = QWidget()
-        self.setCentralWidget(central)
+        self._set_window_content(central)
         body = QVBoxLayout(central)
         body.setContentsMargins(22, 20, 22, 20)
         body.setSpacing(12)
