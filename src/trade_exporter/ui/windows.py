@@ -4,8 +4,9 @@ from functools import partial
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QDate, QEvent, QLocale, QPoint, QSize, QStandardPaths, QThread, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QDate, QEvent, QLocale, QPoint, QRectF, QSize, QStandardPaths, QThread, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QLineEdit, QMainWindow, QProgressBar, QScrollArea,
@@ -59,6 +60,21 @@ def _window_icon(lines):
         painter.drawLine(*line)
     painter.end()
     return QIcon(pixmap)
+
+
+def _settings_icon(size):
+    renderer = QSvgRenderer(str(Path(__file__).parent / "icons" / "settings.svg"))
+    pixmap = QPixmap(size * 2)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter, QRectF(0, 0, size.width(), size.height()))
+    painter.end()
+
+    icon = QIcon()
+    for mode in (QIcon.Mode.Normal, QIcon.Mode.Active, QIcon.Mode.Disabled, QIcon.Mode.Selected):
+        icon.addPixmap(pixmap, mode)
+    return icon
 
 
 class _WindowBar(QFrame):
@@ -398,8 +414,9 @@ class ExportWindow(_JobWindow):
         self.settings_button.setObjectName("TokenSettings")
         self.settings_button.setAccessibleName("Настройки токенов")
         self.settings_button.setToolTip("Настройки токенов")
-        self.settings_button.setIcon(QIcon(str(Path(__file__).parent / "icons" / "settings.svg")))
-        self.settings_button.setIconSize(QSize(17, 17))
+        icon_size = QSize(17, 17)
+        self.settings_button.setIcon(_settings_icon(icon_size))
+        self.settings_button.setIconSize(icon_size)
         self.settings_button.setFixedSize(32, 32)
         header.addWidget(self.settings_button)
         body.addLayout(header)
